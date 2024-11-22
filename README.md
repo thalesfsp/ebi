@@ -51,4 +51,3 @@ go get github.com/thalesfsp/ebi
 3. Make your changes
 4. Run tests
 5. Submit a pull request
-

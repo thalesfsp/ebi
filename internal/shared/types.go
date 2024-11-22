@@ -2,6 +2,6 @@ package shared
 
 // Name and Type of the CLI.
 const (
-	Name = "ebi"
+	Name = "elasticsearch-bulk-indexer"
 	Type = "cli"
 )

@@ -17,8 +17,8 @@ import (
 // Const, vars, and types.
 //////
 
-// ebi is a struct that contains the Elasticsearch client.
-type ebi[T any] struct {
+// EBI is a struct that contains the Elasticsearch client.
+type EBI[T any] struct {
 	client *elasticsearch.Client
 }
 
@@ -29,7 +29,7 @@ type ebi[T any] struct {
 // BulkCreate indexes documents in Elasticsearch using the Bulk API.
 //
 //nolint:gocognit,maintidx
-func (eSI *ebi[T]) BulkCreate(
+func (ebi *EBI[T]) BulkCreate(
 	ctx context.Context,
 	docs []T,
 	opts BulkOptions[T],
@@ -108,7 +108,7 @@ func (eSI *ebi[T]) BulkCreate(
 
 	// Configure Bulk Indexer (BI).
 	bi, err := esutil.NewBulkIndexer(esutil.BulkIndexerConfig{
-		Client:        eSI.client,
+		Client:        ebi.client,
 		Index:         opts.Index,
 		NumWorkers:    opts.NumWorkers,
 		FlushBytes:    opts.FlushBytes,
@@ -153,7 +153,7 @@ func (eSI *ebi[T]) BulkCreate(
 			case <-ctx.Done():
 				return
 			case <-metricsTicker.C:
-				if err := updateIndexMetrics(ctx, eSI.client, indexMetrics); err != nil {
+				if err := updateIndexMetrics(ctx, ebi.client, indexMetrics); err != nil {
 					// Send this async error to the error channel.
 					asyncErrorHandler(
 						ErrorCatalog.
@@ -289,7 +289,7 @@ func (eSI *ebi[T]) BulkCreate(
 
 	// Optionally refresh index.
 	if indexMetrics.TranslogSize > opts.MaxTranslogSize {
-		if err := refreshIndex(ctx, eSI.client, opts.Index); err != nil {
+		if err := refreshIndex(ctx, ebi.client, opts.Index); err != nil {
 			return ErrorCatalog.
 				MustGet(ErrFailedToRefreshIndex).
 				NewFailedToError(
@@ -305,7 +305,7 @@ func (eSI *ebi[T]) BulkCreate(
 // HyperparameterOptimization runs a hyperparameter optimization
 // using the Gaussian Process and Upper Confidence Bound (UCB)
 // as acquisition function against batch size and number of workers.
-func (eSI *ebi[T]) HyperparameterOptimization(
+func (ebi *EBI[T]) HyperparameterOptimization(
 	// Context to be used in the optimization.
 	ctx context.Context,
 
@@ -330,7 +330,7 @@ func (eSI *ebi[T]) HyperparameterOptimization(
 		// We don't care about metrics, just the error, if any
 		// must be returned so the Gaussian Process can learn
 		// and optimize the hyperparameters.
-		if err := eSI.BulkCreate(
+		if err := ebi.BulkCreate(
 			ctx,
 			docs,
 			opts,
@@ -361,7 +361,7 @@ func (eSI *ebi[T]) HyperparameterOptimization(
 func New[T any](
 	ctx context.Context,
 	esConfig elasticsearch.Config,
-) (*ebi[T], error) {
+) (*EBI[T], error) {
 	// Create the client.
 	client, err := elasticsearch.NewClient(esConfig)
 	if err != nil {
@@ -380,7 +380,7 @@ func New[T any](
 
 	defer res.Body.Close()
 
-	return &ebi[T]{
+	return &EBI[T]{
 		client: client,
 	}, nil
 }

@@ -28,7 +28,7 @@ func TestBulkCreate_WithChannelsAndFunctions(t *testing.T) {
 	t.Skip()
 
 	// Ideally use a pointer to the model.
-	eSI, err := New[*TestModel](
+	ebi, err := New[*TestModel](
 		context.Background(),
 		elasticsearch.Config{
 			APIKey:  apiKey,
@@ -106,7 +106,7 @@ func TestBulkCreate_WithChannelsAndFunctions(t *testing.T) {
 		}
 	}()
 
-	if err := eSI.BulkCreate(
+	if err := ebi.BulkCreate(
 		context.Background(),
 		[]*TestModel{
 			{
@@ -134,7 +134,7 @@ func TestBulkCreate(t *testing.T) {
 	t.Skip()
 
 	// Ideally use a pointer to the model.
-	eSI, err := New[*TestModel](
+	ebi, err := New[*TestModel](
 		context.Background(),
 		elasticsearch.Config{
 			APIKey:  apiKey,
@@ -162,7 +162,7 @@ func TestBulkCreate(t *testing.T) {
 		nil, nil, nil,
 	)
 
-	if err := eSI.BulkCreate(
+	if err := ebi.BulkCreate(
 		context.Background(),
 		[]*TestModel{
 			{
@@ -210,7 +210,7 @@ func TestHO_WithChannel(t *testing.T) {
 	//////
 
 	// Ideally use a pointer to the model.
-	eSI, err := New[*TestModel](
+	ebi, err := New[*TestModel](
 		context.Background(),
 		elasticsearch.Config{
 			APIKey:  apiKey,
@@ -285,7 +285,7 @@ func TestHO_WithChannel(t *testing.T) {
 	// HO itself.
 	//////
 
-	bestParams, err := eSI.HyperparameterOptimization(
+	bestParams, err := ebi.HyperparameterOptimization(
 		context.Background(),
 		opts,
 		testModelGenerator(50_000),
@@ -334,7 +334,7 @@ func TestHO(t *testing.T) {
 	//////
 
 	// Ideally use a pointer to the model.
-	eSI, err := New[*TestModel](
+	ebi, err := New[*TestModel](
 		context.Background(),
 		elasticsearch.Config{
 			APIKey:  apiKey,
@@ -370,7 +370,7 @@ func TestHO(t *testing.T) {
 	// HO itself.
 	//////
 
-	bestParams, err := eSI.HyperparameterOptimization(
+	bestParams, err := ebi.HyperparameterOptimization(
 		context.Background(),
 		opts,
 		testModelGenerator(50_000),

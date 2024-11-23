@@ -224,15 +224,18 @@ func (ebi *EBI[T]) BulkCreate(
 			},
 
 			// Document failed to index.
-			OnFailure: func(_ context.Context, _ esutil.BulkIndexerItem, res esutil.BulkIndexerResponseItem, err error) {
+			OnFailure: func(_ context.Context, bII esutil.BulkIndexerItem, res esutil.BulkIndexerResponseItem, err error) {
 				// Send this async error to the error channel.
 				asyncErrorHandler(
 					ErrorCatalog.
 						MustGet(ErrFailedToIndexDocument).
 						NewFailedToError(
 							customerror.WithError(err),
+							customerror.WithField("error", err.Error()),
+							customerror.WithField("res.Error", res.Error),
+							customerror.WithField("bII.DocumentID", bII.DocumentID),
+							customerror.WithField("res.DocID", res.DocumentID),
 							customerror.WithTag("bi.Add"),
-							customerror.WithField("docID", res.DocumentID),
 						),
 				)
 

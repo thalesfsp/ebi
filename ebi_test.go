@@ -390,3 +390,33 @@ func TestHO(t *testing.T) {
 
 	t.Logf("Best parameters: %+v\n", bestParams)
 }
+
+func TestUpdateIndexMetrics(t *testing.T) {
+	t.Skip()
+
+	// Ideally use a pointer to the model.
+	e, err := New[*TestModel](
+		context.Background(),
+		elasticsearch.Config{
+			APIKey:  apiKey,
+			CloudID: cloudID,
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	metrics := IndexMetrics{}
+	metrics.CircuitBreakers = make(map[string]float64)
+
+	if err := updateIndexMetrics(
+		context.Background(),
+		baseIndexName,
+		e.client,
+		&metrics,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Logf("IndexMetrics: %+v\n", metrics)
+}

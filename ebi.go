@@ -153,7 +153,7 @@ func (ebi *EBI[T]) BulkCreate(
 			case <-ctx.Done():
 				return
 			case <-metricsTicker.C:
-				if err := updateIndexMetrics(ctx, ebi.client, indexMetrics); err != nil {
+				if err := updateIndexMetrics(ctx, opts.Index, ebi.client, indexMetrics); err != nil {
 					// Send this async error to the error channel.
 					asyncErrorHandler(
 						ErrorCatalog.

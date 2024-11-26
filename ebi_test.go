@@ -72,26 +72,22 @@ func TestBulkCreate_WithChannelsAndFunctions(t *testing.T) {
 		// bulk settings.
 		rawMessage,
 
-		RefreshPolicyFalse,
-
 		// Dynamically modify the index name, not needed but recommended.
-		func(indexName string) string {
+		WithIndexNameFunc[*TestModel](func(indexName string) string {
 			return fmt.Sprintf("%s-%d", indexName, time.Now().Unix())
-		},
+		}),
 
 		// Dynamically modify the document ID, not needed but recommended.
-		func(doc *TestModel) string {
+		WithDocumentIDFunc(func(doc *TestModel) string {
 			time.Sleep(1 * time.Second)
 
 			return fmt.Sprintf("%s-%d", doc.ID, time.Now().Unix())
-		},
+		}),
 
 		// Dynamically set routing, optional.
-		func(doc *TestModel) string {
+		WithRoutingFunc(func(doc *TestModel) string {
 			return fmt.Sprintf("%d", doc.Group)
-		},
-
-		nil, nil,
+		}),
 	)
 	assert.NoError(t, err)
 
@@ -174,10 +170,6 @@ func TestBulkCreate(t *testing.T) {
 		// Sample of the document to be indexed. This will be used to calculate
 		// bulk settings.
 		rawMessage,
-
-		RefreshPolicyFalse,
-
-		nil, nil, nil, nil, nil,
 	)
 	assert.NoError(t, err)
 
@@ -231,10 +223,6 @@ func TestHO_WithChannel(t *testing.T) {
 		// Sample of the document to be indexed. This will be used to calculate
 		// bulk settings.
 		rawMessage,
-
-		RefreshPolicyFalse,
-
-		nil, nil, nil, nil, nil,
 	)
 	assert.NoError(t, err)
 
@@ -352,10 +340,6 @@ func TestHO(t *testing.T) {
 		// Sample of the document to be indexed. This will be used to calculate
 		// bulk settings.
 		rawMessage,
-
-		RefreshPolicyFalse,
-
-		nil, nil, nil, nil, nil,
 	)
 	assert.NoError(t, err)
 
@@ -472,8 +456,6 @@ func TestBulkCreate_Channels(t *testing.T) {
 	opts, err := NewBulkOptions[*TestModel](
 		baseIndexName,
 		rawMessage,
-		RefreshPolicyFalse,
-		nil, nil, nil, nil, nil,
 	)
 	assert.NoError(t, err)
 

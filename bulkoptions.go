@@ -11,6 +11,9 @@ import (
 // Const, vars, and types.
 //////
 
+// BulkOptionsFunc allows to set options.
+type BulkOptionsFunc[T any] func(o *BulkOptions[T])
+
 // RefreshPolicy defines the refresh policy for the bulk indexing operation.
 type RefreshPolicy = string
 
@@ -73,6 +76,59 @@ type BulkOptions[T any] struct {
 }
 
 //////
+// Exported built-in options.
+//////
+
+// WithRefreshPolicy sets the refresh policy for the bulk indexing operation.
+func WithRefreshPolicy[T any](refreshPolicy RefreshPolicy) BulkOptionsFunc[T] {
+	return func(o *BulkOptions[T]) {
+		o.RefreshPolicy = refreshPolicy
+	}
+}
+
+// WithIndexNameFunc sets the index name function for the bulk indexing operation.
+func WithIndexNameFunc[T any](indexNameFunc func(indexName string) string) BulkOptionsFunc[T] {
+	return func(o *BulkOptions[T]) {
+		o.IndexNameFunc = indexNameFunc
+	}
+}
+
+// WithDocumentIDFunc sets the document ID function for the bulk indexing operation.
+func WithDocumentIDFunc[T any](documentIDFunc func(doc T) string) BulkOptionsFunc[T] {
+	return func(o *BulkOptions[T]) {
+		o.DocumentIDFunc = documentIDFunc
+	}
+}
+
+// WithRoutingFunc sets the routing function for the bulk indexing operation.
+func WithRoutingFunc[T any](routingFunc func(doc T) string) BulkOptionsFunc[T] {
+	return func(o *BulkOptions[T]) {
+		o.RoutingFunc = routingFunc
+	}
+}
+
+// WithPauseFunc sets the pause function for the bulk indexing operation.
+func WithPauseFunc[T any](pauseFunc PauseFunc) BulkOptionsFunc[T] {
+	return func(o *BulkOptions[T]) {
+		o.PauseFunc = pauseFunc
+	}
+}
+
+// WithPauseDuration sets the pause duration for the bulk indexing operation.
+func WithPauseDuration[T any](pauseDuration time.Duration) BulkOptionsFunc[T] {
+	return func(o *BulkOptions[T]) {
+		o.PauseDuration = pauseDuration
+	}
+}
+
+// WithRefreshFunc sets the refresh function for the bulk indexing operation.
+func WithRefreshFunc[T any](refreshFunc RefreshFunc) BulkOptionsFunc[T] {
+	return func(o *BulkOptions[T]) {
+		o.RefreshFunc = refreshFunc
+	}
+}
+
+//////
 // Factory.
 //////
 
@@ -85,20 +141,23 @@ func NewBulkOptions[T any](
 	// Sample document.
 	sampleDoc json.RawMessage,
 
-	// Refresh policy.
-	refreshPolicy RefreshPolicy,
-
-	// Optional functions.
-	indexNameFunc func(indexName string) string,
-	documentIDFunc func(doc T) string,
-	routingFunc func(doc T) string,
-	pauseFunc PauseFunc,
-	refreshFunc RefreshFunc,
+	options ...BulkOptionsFunc[T],
 ) (*BulkOptions[T], error) {
+	//////
+	// Apply options.
+	//////
+
+	var opts BulkOptions[T]
+
+	// Iterate over the options and apply them against params.
+	for _, option := range options {
+		option(&opts)
+	}
+
 	bO := &BulkOptions[T]{
 		Index:         indexName,
 		SampleDoc:     sampleDoc,
-		RefreshPolicy: refreshPolicy,
+		RefreshPolicy: opts.RefreshPolicy,
 
 		BatchSize:      0,
 		NumWorkers:     0,
@@ -107,12 +166,12 @@ func NewBulkOptions[T any](
 		MetricsCheck:   5 * time.Second,
 		RetryOnFailure: 3,
 
-		DocumentIDFunc: documentIDFunc,
-		IndexNameFunc:  indexNameFunc,
-		RoutingFunc:    routingFunc,
-		PauseFunc:      pauseFunc,
+		DocumentIDFunc: opts.DocumentIDFunc,
+		IndexNameFunc:  opts.IndexNameFunc,
+		RoutingFunc:    opts.RoutingFunc,
+		PauseFunc:      opts.PauseFunc,
 		PauseDuration:  5 * time.Second,
-		RefreshFunc:    refreshFunc,
+		RefreshFunc:    opts.RefreshFunc,
 	}
 
 	if err := process(bO); err != nil {

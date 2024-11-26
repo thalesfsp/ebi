@@ -11,8 +11,6 @@ func TestNewBulkOptions(t *testing.T) {
 	got, err := NewBulkOptions[*TestModel](
 		"index",
 		json.RawMessage(`{"id": "1", "group": 1}`),
-		RefreshPolicyFalse,
-		nil, nil, nil, nil, nil,
 	)
 
 	assert.NoError(t, err)

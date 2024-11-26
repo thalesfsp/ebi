@@ -21,6 +21,7 @@ const (
 	ErrFailedToRefreshIndex             = "ERR_FAILED_TO_REFRESH_INDEX"                // FailedTo.
 	ErrFailedToUpdateMetrics            = "ERR_FAILED_TO_UPDATE_METRICS"               // FailedTo.
 	ErrIndexerError                     = "ERR_INDEXER_ERROR"                          // New.
+	ErrInvalidBulkOptions               = "ERR_INVALID_BULK_OPTIONS"                   // Invalid.
 )
 
 // ErrorCatalog is the error catalog for the CLI.
@@ -36,7 +37,8 @@ var ErrorCatalog = customerror.
 	MustSet(ErrFailedToPing, "ping").
 	MustSet(ErrFailedToRefreshIndex, "refresh index").
 	MustSet(ErrFailedToUpdateMetrics, "update metrics").
-	MustSet(ErrIndexerError, "indexer error")
+	MustSet(ErrIndexerError, "indexer error").
+	MustSet(ErrInvalidBulkOptions, "bulk options")
 
 //////
 // Exported functionalities.

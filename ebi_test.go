@@ -9,19 +9,44 @@ import (
 	"time"
 
 	"github.com/elastic/go-elasticsearch/v8"
+	"github.com/stretchr/testify/assert"
 	"github.com/thalesfsp/ho"
 )
+
+//////
+// Const, vars, and types.
+//////
 
 var (
 	apiKey        = os.Getenv("ELASTICSEARCH_API_KEY")
 	cloudID       = os.Getenv("ELASTICSEARCH_CLOUD_ID")
 	baseIndexName = os.Getenv("ELASTICSEARCH_BASE_INDEX_NAME")
+
+	rawMessage = json.RawMessage(`{"id": "1", "group": 1}`)
 )
 
 // TestModel is a test model.
 type TestModel struct {
 	ID    string `json:"id"`
 	Group int    `json:"group"`
+}
+
+//////
+// Helper function(s).
+//////
+
+// Test model generator.
+func testModelGenerator(amount int) []*TestModel {
+	acc := make([]*TestModel, 0, amount)
+
+	for i := 0; i < amount; i++ {
+		acc = append(acc, &TestModel{
+			ID:    fmt.Sprintf("%d", i),
+			Group: 1,
+		})
+	}
+
+	return acc
 }
 
 func TestBulkCreate_WithChannelsAndFunctions(t *testing.T) {
@@ -39,19 +64,15 @@ func TestBulkCreate_WithChannelsAndFunctions(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	opts := NewBulkOptions(
+	opts, err := NewBulkOptions(
 		// Base index name. Will be modified by the indexNameFunc.
 		baseIndexName,
 
 		// Sample of the document to be indexed. This will be used to calculate
 		// bulk settings.
-		json.RawMessage(`{"id": "1", "group": 1}`),
+		rawMessage,
 
-		// Cluster settings: data nodes and memory per node.
-		3, 4,
-
-		// Should refresh after bulk create, ideally no.
-		false,
+		RefreshPolicyFalse,
 
 		// Dynamically modify the index name, not needed but recommended.
 		func(indexName string) string {
@@ -69,31 +90,32 @@ func TestBulkCreate_WithChannelsAndFunctions(t *testing.T) {
 		func(doc *TestModel) string {
 			return fmt.Sprintf("%d", doc.Group)
 		},
+
+		nil, nil,
 	)
+	assert.NoError(t, err)
 
 	// Not needed, only for testing purposes.
 	opts.MetricsCheck = 100 * time.Millisecond
 
-	globalMetricsCh := make(chan *GlobalMetrics)
-	defer close(globalMetricsCh)
+	metricsCh := make(chan *Metrics)
+	defer close(metricsCh)
 
 	errorCh := make(chan error)
 	defer close(errorCh)
 
 	// Go routine to do something with metrics and errors.
 	go func() {
-		// Receives global metrics and print it.
+		// Receives metrics and print it.
 		for {
 			select {
 			// REMEMBER, you MUST check `ok` value to avoid deadlock!
-			case gm, ok := <-globalMetricsCh:
+			case gm, ok := <-metricsCh:
 				if !ok {
 					return
 				}
 
-				t.Logf("GlobalMetrics.BulkMetrics: %+v\n", gm.BulkMetrics)
-
-				t.Logf("GlobalMetrics.IndexMetrics: %+v\n", gm.IndexMetrics)
+				t.Logf("Metrics: %+v\n", gm)
 
 			// REMEMBER, you MUST check `ok` value to avoid deadlock!
 			case err, ok := <-errorCh:
@@ -121,7 +143,7 @@ func TestBulkCreate_WithChannelsAndFunctions(t *testing.T) {
 		opts,
 
 		// Optional, but set here for demonstration purposes.
-		globalMetricsCh,
+		metricsCh,
 
 		// Optional, but set here for demonstration purposes.
 		errorCh,
@@ -145,22 +167,19 @@ func TestBulkCreate(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	opts := NewBulkOptions[*TestModel](
+	opts, err := NewBulkOptions[*TestModel](
 		// Base index name. Will be modified by the indexNameFunc.
 		fmt.Sprintf("%s-test", baseIndexName),
 
 		// Sample of the document to be indexed. This will be used to calculate
 		// bulk settings.
-		json.RawMessage(`{"id": "1", "group": 1}`),
+		rawMessage,
 
-		// Cluster settings: data nodes and memory per node.
-		3, 4,
+		RefreshPolicyFalse,
 
-		// Should refresh after bulk create, ideally no.
-		false,
-
-		nil, nil, nil,
+		nil, nil, nil, nil, nil,
 	)
+	assert.NoError(t, err)
 
 	if err := ebi.BulkCreate(
 		context.Background(),
@@ -186,26 +205,6 @@ func TestHO_WithChannel(t *testing.T) {
 	t.Skip()
 
 	//////
-	// Helper function.
-	//////
-
-	// Test model generator.
-	testModelGenerator := func(amount int) []*TestModel {
-		t.Helper()
-
-		acc := make([]*TestModel, 0, amount)
-
-		for i := 0; i < amount; i++ {
-			acc = append(acc, &TestModel{
-				ID:    fmt.Sprintf("%d", i),
-				Group: 1,
-			})
-		}
-
-		return acc
-	}
-
-	//////
 	// ES client setup.
 	//////
 
@@ -225,22 +224,19 @@ func TestHO_WithChannel(t *testing.T) {
 	// Bulk setup.
 	//////
 
-	opts := NewBulkOptions[*TestModel](
+	opts, err := NewBulkOptions[*TestModel](
 		// Base index name. Will be modified by the indexNameFunc.
 		fmt.Sprintf("%s-test-ho", baseIndexName),
 
 		// Sample of the document to be indexed. This will be used to calculate
 		// bulk settings.
-		json.RawMessage(`{"id": "1", "group": 1}`),
+		rawMessage,
 
-		// Cluster settings: data nodes and memory per node.
-		3, 4,
+		RefreshPolicyFalse,
 
-		// Should refresh after bulk create, ideally no.
-		false,
-
-		nil, nil, nil,
+		nil, nil, nil, nil, nil,
 	)
+	assert.NoError(t, err)
 
 	//////
 	// HO setup.
@@ -267,7 +263,7 @@ func TestHO_WithChannel(t *testing.T) {
 	// Start a goroutine to handle progress updates.
 	// Go routine to do something with metrics and errors.
 	go func() {
-		// Receives global metrics and print it.
+		// Receives metrics and print it.
 		for {
 			select {
 			// REMEMBER, you MUST check `ok` value to avoid deadlock!
@@ -349,22 +345,19 @@ func TestHO(t *testing.T) {
 	// Bulk setup.
 	//////
 
-	opts := NewBulkOptions[*TestModel](
+	opts, err := NewBulkOptions[*TestModel](
 		// Base index name. Will be modified by the indexNameFunc.
 		fmt.Sprintf("%s-test-ho", baseIndexName),
 
 		// Sample of the document to be indexed. This will be used to calculate
 		// bulk settings.
-		json.RawMessage(`{"id": "1", "group": 1}`),
+		rawMessage,
 
-		// Cluster settings: data nodes and memory per node.
-		3, 4,
+		RefreshPolicyFalse,
 
-		// Should refresh after bulk create, ideally no.
-		false,
-
-		nil, nil, nil,
+		nil, nil, nil, nil, nil,
 	)
+	assert.NoError(t, err)
 
 	//////
 	// HO itself.
@@ -402,21 +395,96 @@ func TestUpdateIndexMetrics(t *testing.T) {
 			CloudID: cloudID,
 		},
 	)
-	if err != nil {
-		t.Fatal(err)
-	}
+	assert.NoError(t, err)
 
-	metrics := IndexMetrics{}
-	metrics.CircuitBreakers = make(map[string]float64)
+	metrics := Metrics{}
 
-	if err := updateIndexMetrics(
+	assert.NoError(t, updateIndexMetrics(
 		context.Background(),
-		baseIndexName,
 		e.client,
 		&metrics,
-	); err != nil {
-		t.Fatal(err)
-	}
+	))
 
-	t.Logf("IndexMetrics: %+v\n", metrics)
+	b, err := json.MarshalIndent(metrics.GetMetrics(), "", "  ")
+	assert.NoError(t, err)
+	assert.NotEmpty(t, string(b))
+}
+
+func TestBulkCreate_Channels(t *testing.T) {
+	t.Skip()
+
+	// Create test context with timeout
+	ctx := context.Background()
+
+	// Initialize channels with buffer to prevent blocking.
+	metricsChannel := make(chan *Metrics, 100)
+	errorChannel := make(chan error, 100)
+
+	// Create done channel for graceful shutdown.
+	done := make(chan bool)
+
+	// Start goroutine to collect metrics.
+	go func() {
+		defer close(done)
+
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case metric, ok := <-metricsChannel:
+				if !ok {
+					return
+				}
+
+				// Convert metric to pretty JSON and print that.
+				b, err := json.MarshalIndent(metric, "", "  ")
+				assert.NoError(t, err)
+
+				assert.NotEmpty(t, string(b))
+			case err, ok := <-errorChannel:
+				if !ok {
+					return
+				}
+
+				t.Logf("Error: %v", err)
+
+				t.Fail()
+			}
+		}
+	}()
+
+	// Initialize EBI client with test configuration.
+	ebi, err := New[*TestModel](
+		ctx,
+		elasticsearch.Config{
+			APIKey:  apiKey,
+			CloudID: cloudID,
+		},
+	)
+
+	assert.NotNil(t, ebi)
+	assert.NoError(t, err)
+
+	// Create test data
+	testDocs := testModelGenerator(50_000)
+
+	// Create bulk options
+	opts, err := NewBulkOptions[*TestModel](
+		baseIndexName,
+		rawMessage,
+		RefreshPolicyFalse,
+		nil, nil, nil, nil, nil,
+	)
+	assert.NoError(t, err)
+
+	opts.BatchSize = 500
+	opts.NumWorkers = 1
+	opts.MetricsCheck = 300 * time.Millisecond
+	opts.FlushInterval = 1 * time.Second
+	opts.RetryOnFailure = 1
+
+	assert.NoError(t, ebi.BulkCreate(ctx, testDocs, opts, metricsChannel, errorChannel))
+
+	// Will wait for goroutine to finish.
+	<-done
 }

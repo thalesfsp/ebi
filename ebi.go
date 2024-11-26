@@ -4,7 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"sync/atomic"
+	"fmt"
 	"time"
 
 	"github.com/elastic/go-elasticsearch/v8"
@@ -17,9 +17,35 @@ import (
 // Const, vars, and types.
 //////
 
+// PauseFunc determines the conditions to pause the indexing process.
+type PauseFunc func(metrics *Metrics) bool
+
+// RefreshFunc determines the conditions to refresh the index. A good metrics
+// for that is the TranslogSize.
+type RefreshFunc func(ctx context.Context, metrics *Metrics) bool
+
 // EBI is a struct that contains the Elasticsearch client.
 type EBI[T any] struct {
 	client *elasticsearch.Client
+}
+
+// Refresh the index freeing up translog space.
+func (ebi *EBI[T]) refreshIndex(ctx context.Context, indexName string) error {
+	res, err := ebi.client.Indices.Refresh(
+		ebi.client.Indices.Refresh.WithContext(ctx),
+		ebi.client.Indices.Refresh.WithIndex(indexName),
+	)
+	if err != nil {
+		return err
+	}
+
+	defer res.Body.Close()
+
+	if res.IsError() {
+		return fmt.Errorf("failed to refresh index: %s", res.String())
+	}
+
+	return nil
 }
 
 //////
@@ -28,27 +54,94 @@ type EBI[T any] struct {
 
 // BulkCreate indexes documents in Elasticsearch using the Bulk API.
 //
-//nolint:gocognit,maintidx
+//nolint:gocognit,maintidx,nestif
 func (ebi *EBI[T]) BulkCreate(
 	ctx context.Context,
 	docs []T,
-	opts BulkOptions[T],
+	opts *BulkOptions[T],
 
 	// For async metrics, optional.
-	globalMetricsCh chan<- *GlobalMetrics,
+	metricsCh chan<- *Metrics,
 
 	// For async errors, optional.
 	errorCh chan<- error,
 ) error {
 	//////
-	// Docs validation.
+	// Validation.
 	//////
 
+	// Docs.
 	if len(docs) == 0 {
 		return ErrorCatalog.
 			MustGet(ErrDocumentsRequired).
 			NewRequiredError()
 	}
+
+	// Process.
+	if err := process(opts); err != nil {
+		return ErrorCatalog.
+			MustGet(ErrInvalidBulkOptions).
+			NewRequiredError()
+	}
+
+	//////
+	// Metrics initialization.
+	//////
+
+	// Initialize metrics.
+	metrics, err := NewMetrics()
+	if err != nil {
+		return err
+	}
+
+	//////
+	// Get initial node stats.
+	//////
+
+	if err := updateIndexMetrics(ctx, ebi.client, metrics); err != nil {
+		return err
+	}
+
+	//////
+	// Calculate recommended number of workers.
+	//////
+
+	// Calculate the size of the sample document.
+	docSize := len(opts.SampleDoc) // in bytes.
+
+	// Determine the recommended batch size.
+	targetBatchSizeBytes := 5 * 1024 * 1024 // Target batch size of 5MB.
+
+	recommendedBatchSize := targetBatchSizeBytes / docSize
+
+	if recommendedBatchSize < 1 {
+		recommendedBatchSize = 1
+	}
+
+	// Set batch size.
+	if opts.BatchSize == 0 {
+		opts.BatchSize = roundToNearestThousandDivisibleBy2(recommendedBatchSize)
+	}
+
+	if opts.NumWorkers == 0 {
+		jvmHeapSizeGB := float64(metrics.ramPerNodeGB) / 2
+
+		workersPerNode := int(jvmHeapSizeGB / 1)
+
+		if workersPerNode < 1 {
+			workersPerNode = 1
+		}
+
+		// Set number of workers.
+		opts.NumWorkers = metrics.numDataNodes * workersPerNode
+	}
+
+	// Set FlushBytes size.
+	opts.FlushBytes = recommendedBatchSize * docSize
+
+	//////
+	// Pause feature.
+	//////
 
 	//////
 	// Internal helper.
@@ -59,38 +152,6 @@ func (ebi *EBI[T]) BulkCreate(
 		if errorCh != nil {
 			errorCh <- err
 		}
-	}
-
-	//////
-	// Metrics initialization.
-	//////
-
-	// Initialize bulk metrics with explicit reset
-	bulkMetrics := &BulkMetrics{
-		DocsProcessed:  0,
-		DocsFailed:     0,
-		DocsSucceeded:  0,
-		BytesProcessed: 0,
-		ErrorCount:     0,
-		FailedItems:    make([]FailedItem, 0),
-		LastError:      nil,
-	}
-
-	// Initialize index metrics.
-	indexMetrics := &IndexMetrics{
-		CircuitBreakers:  make(map[string]float64),
-		IndexingPressure: 0,
-		JVMHeapUsage:     0,
-		SegmentsCount:    0,
-		SegmentsMemory:   0,
-		TranslogSize:     0,
-		UnassignedShards: 0,
-	}
-
-	// Initialize global metrics.
-	globalMetrics := &GlobalMetrics{
-		BulkMetrics:  bulkMetrics,
-		IndexMetrics: indexMetrics,
 	}
 
 	//////
@@ -115,7 +176,7 @@ func (ebi *EBI[T]) BulkCreate(
 		FlushInterval: opts.FlushInterval,
 		OnError: func(_ context.Context, err error) {
 			// Update metrics.
-			bulkMetrics.LastError = err
+			metrics.IncrementErrorCount()
 
 			// Send this async error to the error channel.
 			asyncErrorHandler(
@@ -123,7 +184,7 @@ func (ebi *EBI[T]) BulkCreate(
 					MustGet(ErrIndexerError).
 					NewFailedToError(
 						customerror.WithError(err),
-						customerror.WithTag("esutil.NewBulkIndexer"),
+						customerror.WithTag("esutil.NewBulkIndexer.OnError"),
 					),
 			)
 		},
@@ -133,6 +194,7 @@ func (ebi *EBI[T]) BulkCreate(
 			MustGet(ErrFailedToCreateBulkIndexer).
 			NewFailedToError(
 				customerror.WithError(err),
+				customerror.WithTag("esutil.NewBulkIndexer"),
 			)
 	}
 
@@ -153,29 +215,47 @@ func (ebi *EBI[T]) BulkCreate(
 			case <-ctx.Done():
 				return
 			case <-metricsTicker.C:
-				if err := updateIndexMetrics(ctx, opts.Index, ebi.client, indexMetrics); err != nil {
+				if err := updateIndexMetrics(ctx, ebi.client, metrics); err != nil {
 					// Send this async error to the error channel.
 					asyncErrorHandler(
 						ErrorCatalog.
 							MustGet(ErrFailedToUpdateMetrics).
 							NewFailedToError(
 								customerror.WithError(err),
-								customerror.WithTag("updateIndexMetrics"),
+								customerror.WithTag("metricsloop.updateIndexMetrics"),
 							),
 					)
+				} else {
+					// Determine if we should pause the bulk indexer.
+					if opts.PauseFunc != nil {
+						if opts.PauseFunc(metrics) {
+							// Pause the if met conditions.
+							metrics.UpdateStatus(StatusPaused)
+						} else {
+							// Remove pause if conditions improves.
+							metrics.UpdateStatus(StatusRunning)
+						}
+					}
 
-					continue
+					// Send metrics to the channel.
+					if metricsCh != nil {
+						metricsCh <- metrics
+					}
 				}
 
-				// Send metrics to the channel.
-				if globalMetricsCh != nil {
-					globalMetricsCh <- globalMetrics
-				}
-
-				// For everytime metrics update, determine if should pause.
-				if shouldTemporaryPause(*indexMetrics, opts) {
-					// TODO: Make it configurable.
-					time.Sleep(5 * time.Second)
+				// Determine if we should refresh the index.
+				if opts.RefreshFunc != nil && opts.RefreshFunc(ctx, metrics) {
+					if err := ebi.refreshIndex(ctx, opts.Index); err != nil {
+						// Send this async error to the error channel.
+						asyncErrorHandler(
+							ErrorCatalog.
+								MustGet(ErrFailedToUpdateMetrics).
+								NewFailedToError(
+									customerror.WithError(err),
+									customerror.WithTag("metricsloop.refreshIndex"),
+								),
+						)
+					}
 				}
 			}
 		}
@@ -190,13 +270,17 @@ func (ebi *EBI[T]) BulkCreate(
 			return err
 		}
 
+		// Thread-safe check if the bulk indexer should be pause. If status is
+		// to "paused", then it pauses.
+		if metrics.GetMetrics().Status == StatusPaused {
+			time.Sleep(opts.PauseDuration)
+		}
+
 		// Convert document to JSON.
 		data, err := json.Marshal(doc)
 		if err != nil {
 			// Update metrics.
-			bulkMetrics.LastError = err
-
-			atomic.AddInt64(&bulkMetrics.DocsFailed, 1)
+			metrics.IncrementErrorCount()
 
 			// Send this async error to the error channel.
 			asyncErrorHandler(
@@ -220,7 +304,7 @@ func (ebi *EBI[T]) BulkCreate(
 			// Document successfully indexed.
 			OnSuccess: func(_ context.Context, _ esutil.BulkIndexerItem, _ esutil.BulkIndexerResponseItem) {
 				// Update metrics.
-				atomic.AddInt64(&bulkMetrics.DocsSucceeded, 1)
+				metrics.IncreaseDocsSucceeded()
 			},
 
 			// Document failed to index.
@@ -240,15 +324,9 @@ func (ebi *EBI[T]) BulkCreate(
 				)
 
 				// Update metrics.
-				atomic.AddInt64(&bulkMetrics.DocsFailed, 1)
+				metrics.IncreaseDocsFailed()
 
-				bulkMetrics.LastError = err
-
-				bulkMetrics.FailedItems = append(bulkMetrics.FailedItems, FailedItem{
-					ID:     res.DocumentID,
-					Reason: res.Error.Reason,
-					Status: res.Status,
-				})
+				metrics.IncrementErrorCount()
 			},
 		}
 
@@ -262,6 +340,7 @@ func (ebi *EBI[T]) BulkCreate(
 			bII.Routing = opts.RoutingFunc(doc)
 		}
 
+		// Actually add the document to the bulk indexer.
 		if err := bi.Add(ctx, bII); err != nil {
 			return ErrorCatalog.
 				MustGet(ErrFailedToAddDocumentToBulkIndexer).
@@ -272,9 +351,9 @@ func (ebi *EBI[T]) BulkCreate(
 		}
 
 		// Update metrics.
-		atomic.AddInt64(&bulkMetrics.DocsProcessed, 1)
+		metrics.IncreaseDocsProcessed()
 
-		atomic.AddInt64(&bulkMetrics.BytesProcessed, int64(len(data)))
+		metrics.UpdateBytesProcessed(int64(len(data)))
 	}
 
 	// Final statistics.
@@ -290,18 +369,6 @@ func (ebi *EBI[T]) BulkCreate(
 			)
 	}
 
-	// Optionally refresh index.
-	if indexMetrics.TranslogSize > opts.MaxTranslogSize {
-		if err := refreshIndex(ctx, ebi.client, opts.Index); err != nil {
-			return ErrorCatalog.
-				MustGet(ErrFailedToRefreshIndex).
-				NewFailedToError(
-					customerror.WithError(err),
-					customerror.WithTag("refreshIndex"),
-				)
-		}
-	}
-
 	return nil
 }
 
@@ -313,7 +380,7 @@ func (ebi *EBI[T]) HyperparameterOptimization(
 	ctx context.Context,
 
 	// Bulk options to be optimized.
-	opts BulkOptions[T],
+	opts *BulkOptions[T],
 
 	// Documents to be used in the optimization.
 	docs []T,

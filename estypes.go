@@ -1,98 +1,5 @@
 package ebi
 
-import "time"
-
-//////
-// Const, vars, and types.
-//////
-
-// BulkOptions defines the options for bulk indexing.
-type BulkOptions[T any] struct {
-	// These are options that can be used in the hyperparameter tuning.
-	BatchSize  int `json:"batch_size"  validate:"required"`
-	NumWorkers int `json:"num_workers" validate:"required"`
-
-	// MetricsCheck determines how often the metrics are checked and sent via
-	// channel.
-	MetricsCheck time.Duration `default:"5s" json:"metrics_check" validate:"required"`
-
-	CircuitBreakerThresholds map[string]float64
-
-	FlushBytes          int
-	FlushInterval       time.Duration
-	Index               string
-	MaxIndexingPressure float64
-	MaxJVMHeapUsage     float64
-	MaxTranslogSize     int64
-	RefreshPolicy       string
-	RetryOnFailure      int
-
-	//////
-	// Dynamic options, they are optional.
-	//////
-
-	// DocumentIDFunc determines in the evaluation time the document ID.
-	DocumentIDFunc func(doct T) string
-
-	// IndexNameFunc determines in the evaluation time the index name.
-	IndexNameFunc func(indexName string) string
-
-	// RoutingFunc determines in the evaluation time the routing value.
-	RoutingFunc func(doct T) string
-}
-
-//////
-// Bulk metrics.
-//////
-
-// FailedItem contains information about a document that failed to index.
-type FailedItem struct {
-	ID     string
-	Reason string
-	Status int
-}
-
-// BulkMetrics contains metrics for a bulk indexing operation.
-type BulkMetrics struct {
-	BytesProcessed int64
-	DocsFailed     int64
-	DocsProcessed  int64
-	DocsSucceeded  int64
-	Error          error
-	ErrorCount     int64
-	FailedItems    []FailedItem
-	LastError      error
-}
-
-//////
-// Index metrics.
-//////
-
-// IndexMetrics contains metrics for an Elasticsearch index.
-type IndexMetrics struct {
-	CircuitBreakers  map[string]float64
-	IndexingPressure float64
-	JVMHeapUsage     float64
-	SegmentsCount    int
-	SegmentsMemory   int64
-	TranslogSize     int64
-	UnassignedShards int
-
-	// Friendly system pressure metrics.
-	SystemPressure SystemPressure
-}
-
-//////
-// Total metrics.
-//////
-
-// GlobalMetrics contains metrics for a bulk indexing operation and an ES index.
-type GlobalMetrics struct {
-	*BulkMetrics
-
-	*IndexMetrics
-}
-
 //////
 // Indices stats.
 //////
@@ -137,7 +44,7 @@ type SegmentStats struct {
 	FileSizes                 map[string]interface{} `json:"file_sizes"`
 	FixedBitSetMemoryInBytes  int64                  `json:"fixed_bit_set_memory_in_bytes"`
 	IndexWriterMemoryInBytes  int64                  `json:"index_writer_memory_in_bytes"`
-	MaxUnsafeAutoIdTimestamp  int64                  `json:"max_unsafe_auto_id_timestamp"`
+	MaxUnsafeAutoIDTimestamp  int64                  `json:"max_unsafe_auto_id_timestamp"`
 	MemoryInBytes             int64                  `json:"memory_in_bytes"`
 	NormsMemoryInBytes        int64                  `json:"norms_memory_in_bytes"`
 	PointsMemoryInBytes       int64                  `json:"points_memory_in_bytes"`
@@ -160,8 +67,8 @@ type TranslogStats struct {
 // Nodes stats.
 //////
 
-// NodesStatsResponse represents the top-level response from Elasticsearch nodes stats API.
-type NodesStatsResponse struct {
+// NodesStats represents the top-level response from Elasticsearch nodes stats API.
+type NodesStats struct {
 	ClusterName string                  `json:"cluster_name"`
 	NodeStats   *NodeStatsShardInfo     `json:"_nodes"`
 	Nodes       map[string]*NodeDetails `json:"nodes"`
@@ -172,6 +79,14 @@ type NodeStatsShardInfo struct {
 	Total      int `json:"total"`
 	Successful int `json:"successful"`
 	Failed     int `json:"failed"`
+}
+
+type MemoryStats struct {
+	TotalSizeInBytes int64 `json:"total_in_bytes"`
+}
+
+type OSStats struct {
+	Memory *MemoryStats `json:"memory"`
 }
 
 // NodeDetails contains detailed information about a specific node.
@@ -187,9 +102,10 @@ type NodeDetails struct {
 	Breakers         *BreakerStats          `json:"breakers"`
 	IndexingPressure *IndexingPressureStats `json:"indexing_pressure"`
 	Indices          *IndicesStats          `json:"indices"`
+	OS               *OSStats               `json:"os"`
 }
 
-// IndicesStats contém todas as estatísticas relacionadas aos índices.
+// IndicesStats contains statistics for indices.
 type IndicesStats struct {
 	Bulk         *BulkStats         `json:"bulk"`
 	Completion   *CompletionStats   `json:"completion"`
@@ -211,6 +127,7 @@ type IndicesStats struct {
 	Mappings     *MappingsStats     `json:"mappings"`
 }
 
+// BulkStats contains bulk-related statistics.
 type BulkStats struct {
 	TotalOperations   int64   `json:"total_operations"`
 	TotalTimeInMillis int64   `json:"total_time_in_millis"`
@@ -219,26 +136,31 @@ type BulkStats struct {
 	AvgSizeInBytes    float64 `json:"avg_size_in_bytes"`
 }
 
+// CompletionStats contains completion-related statistics.
 type CompletionStats struct {
 	SizeInBytes int64 `json:"size_in_bytes"`
 }
 
+// DocsStats contains document-related statistics.
 type DocsStats struct {
 	Count            int64 `json:"count"`
 	Deleted          int64 `json:"deleted"`
 	TotalSizeInBytes int64 `json:"total_size_in_bytes"`
 }
 
+// FielddataStats contains fielddata-related statistics.
 type FielddataStats struct {
 	Evictions         int64                `json:"evictions"`
 	MemorySizeInBytes int64                `json:"memory_size_in_bytes"`
 	GlobalOrdinals    *GlobalOrdinalsStats `json:"global_ordinals"`
 }
 
+// GlobalOrdinalsStats contains global ordinals statistics.
 type GlobalOrdinalsStats struct {
 	BuildTimeInMillis int64 `json:"build_time_in_millis"`
 }
 
+// FlushStats contains flush-related statistics.
 type FlushStats struct {
 	Total                                   int64 `json:"total"`
 	Periodic                                int64 `json:"periodic"`
@@ -246,6 +168,7 @@ type FlushStats struct {
 	TotalTimeExcludingWaitingOnLockInMillis int64 `json:"total_time_excluding_waiting_on_lock_in_millis"`
 }
 
+// GetStats contains get-related statistics.
 type GetStats struct {
 	Current             int64 `json:"current"`
 	ExistsTotal         int64 `json:"exists_total"`
@@ -256,6 +179,7 @@ type GetStats struct {
 	TimeInMillis        int64 `json:"time_in_millis"`
 }
 
+// IndexingStats contains indexing-related statistics.
 type IndexingStats struct {
 	IndexTotal           int64   `json:"index_total"`
 	IndexTimeInMillis    int64   `json:"index_time_in_millis"`
@@ -270,6 +194,7 @@ type IndexingStats struct {
 	WriteLoad            float64 `json:"write_load"`
 }
 
+// MergesStats contains merge-related statistics.
 type MergesStats struct {
 	Current                    int64 `json:"current"`
 	CurrentDocs                int64 `json:"current_docs"`
@@ -283,6 +208,7 @@ type MergesStats struct {
 	TotalAutoThrottleInBytes   int64 `json:"total_auto_throttle_in_bytes"`
 }
 
+// QueryCacheStats contains query cache statistics.
 type QueryCacheStats struct {
 	MemorySizeInBytes int64 `json:"memory_size_in_bytes"`
 	TotalCount        int64 `json:"total_count"`
@@ -293,12 +219,14 @@ type QueryCacheStats struct {
 	Evictions         int64 `json:"evictions"`
 }
 
+// RecoveryStats contains recovery-related statistics.
 type RecoveryStats struct {
 	CurrentAsSource      int64 `json:"current_as_source"`
 	CurrentAsTarget      int64 `json:"current_as_target"`
 	ThrottleTimeInMillis int64 `json:"throttle_time_in_millis"`
 }
 
+// RefreshStats contains refresh-related statistics.
 type RefreshStats struct {
 	Total                     int64 `json:"total"`
 	TotalTimeInMillis         int64 `json:"total_time_in_millis"`
@@ -307,6 +235,7 @@ type RefreshStats struct {
 	Listeners                 int64 `json:"listeners"`
 }
 
+// RequestCacheStats contains request cache statistics.
 type RequestCacheStats struct {
 	MemorySizeInBytes int64 `json:"memory_size_in_bytes"`
 	HitCount          int64 `json:"hit_count"`
@@ -314,6 +243,7 @@ type RequestCacheStats struct {
 	Evictions         int64 `json:"evictions"`
 }
 
+// SearchStats contains search-related statistics.
 type SearchStats struct {
 	OpenContexts        int64 `json:"open_contexts"`
 	QueryTotal          int64 `json:"query_total"`
@@ -330,34 +260,38 @@ type SearchStats struct {
 	SuggestCurrent      int64 `json:"suggest_current"`
 }
 
+// SegmentsStats contains segment-related statistics.
 type SegmentsStats struct {
 	Count                     int64                  `json:"count"`
+	DocValuesMemoryInBytes    int64                  `json:"doc_values_memory_in_bytes"`
+	FileSizes                 map[string]interface{} `json:"file_sizes"`
+	FixedBitSetMemoryInBytes  int64                  `json:"fixed_bit_set_memory_in_bytes"`
+	IndexWriterMemoryInBytes  int64                  `json:"index_writer_memory_in_bytes"`
+	MaxUnsafeAutoIDTimestamp  int64                  `json:"max_unsafe_auto_id_timestamp"`
 	Memory                    int64                  `json:"memory_in_bytes"`
-	TermsMemoryInBytes        int64                  `json:"terms_memory_in_bytes"`
-	StoredFieldsMemoryInBytes int64                  `json:"stored_fields_memory_in_bytes"`
-	TermVectorsMemoryInBytes  int64                  `json:"term_vectors_memory_in_bytes"`
 	NormsMemoryInBytes        int64                  `json:"norms_memory_in_bytes"`
 	PointsMemoryInBytes       int64                  `json:"points_memory_in_bytes"`
-	DocValuesMemoryInBytes    int64                  `json:"doc_values_memory_in_bytes"`
-	IndexWriterMemoryInBytes  int64                  `json:"index_writer_memory_in_bytes"`
+	StoredFieldsMemoryInBytes int64                  `json:"stored_fields_memory_in_bytes"`
+	TermsMemoryInBytes        int64                  `json:"terms_memory_in_bytes"`
+	TermVectorsMemoryInBytes  int64                  `json:"term_vectors_memory_in_bytes"`
 	VersionMapMemoryInBytes   int64                  `json:"version_map_memory_in_bytes"`
-	FixedBitSetMemoryInBytes  int64                  `json:"fixed_bit_set_memory_in_bytes"`
-	MaxUnsafeAutoIdTimestamp  int64                  `json:"max_unsafe_auto_id_timestamp"`
-	FileSizes                 map[string]interface{} `json:"file_sizes"`
 }
 
+// StoreStats contains store-related statistics.
 type StoreStats struct {
 	SizeInBytes             int64 `json:"size_in_bytes"`
 	ReservedInBytes         int64 `json:"reserved_in_bytes"`
 	TotalDataSetSizeInBytes int64 `json:"total_data_set_size_in_bytes"`
 }
 
+// WarmerStats contains warmer-related statistics.
 type WarmerStats struct {
 	Current           int64 `json:"current"`
 	Total             int64 `json:"total"`
 	TotalTimeInMillis int64 `json:"total_time_in_millis"`
 }
 
+// MappingsStats contains mapping-related statistics.
 type MappingsStats struct {
 	TotalCount                    int64 `json:"total_count"`
 	TotalEstimatedOverheadInBytes int64 `json:"total_estimated_overhead_in_bytes"`
@@ -468,20 +402,4 @@ type BreakerDetails struct {
 	LimitSizeInBytes     int64   `json:"limit_size_in_bytes"`
 	Overhead             float64 `json:"overhead"`
 	Tripped              int64   `json:"tripped"`
-}
-
-//////
-// Human readable metrics.
-//////
-
-// SystemPressure represents system pressure metrics in a human-readable way.
-type SystemPressure struct {
-	// Overall pressure (0-100%).
-	OverallPressure float64
-
-	// Memory pressure (0-100%).
-	MemoryPressure float64
-
-	// Write pressure (0-100%).
-	WritePressure float64
 }

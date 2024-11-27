@@ -64,6 +64,12 @@ func TestBulkCreate_WithChannelsAndFunctions(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	metricsCh := make(chan *Metrics)
+	defer close(metricsCh)
+
+	errorCh := make(chan error)
+	defer close(errorCh)
+
 	opts, err := NewBulkOptions(
 		// Base index name. Will be modified by the indexNameFunc.
 		baseIndexName,
@@ -88,17 +94,17 @@ func TestBulkCreate_WithChannelsAndFunctions(t *testing.T) {
 		WithRoutingFunc(func(doc *TestModel) string {
 			return fmt.Sprintf("%d", doc.Group)
 		}),
+
+		// Optional, but set here for demonstration purposes.
+		WithMetricsCh[*TestModel](metricsCh),
+
+		// Optional, but set here for demonstration purposes.
+		WithErrorCh[*TestModel](errorCh),
 	)
 	assert.NoError(t, err)
 
 	// Not needed, only for testing purposes.
 	opts.MetricsCheck = 100 * time.Millisecond
-
-	metricsCh := make(chan *Metrics)
-	defer close(metricsCh)
-
-	errorCh := make(chan error)
-	defer close(errorCh)
 
 	// Go routine to do something with metrics and errors.
 	go func() {
@@ -137,12 +143,6 @@ func TestBulkCreate_WithChannelsAndFunctions(t *testing.T) {
 			},
 		},
 		opts,
-
-		// Optional, but set here for demonstration purposes.
-		metricsCh,
-
-		// Optional, but set here for demonstration purposes.
-		errorCh,
 	); err != nil {
 		t.Fatal(err)
 	}
@@ -186,8 +186,6 @@ func TestBulkCreate(t *testing.T) {
 			},
 		},
 		opts,
-
-		nil, nil,
 	); err != nil {
 		t.Fatal(err)
 	}
@@ -271,8 +269,8 @@ func TestHO_WithChannel(t *testing.T) {
 
 	bestParams, err := ebi.HyperparameterOptimization(
 		context.Background(),
-		opts,
 		testModelGenerator(50_000),
+		opts,
 		optimizationConfig,
 		// Hyperparameter ranges.
 		[]ho.ParameterRange[int]{
@@ -349,8 +347,8 @@ func TestHO(t *testing.T) {
 
 	bestParams, err := ebi.HyperparameterOptimization(
 		context.Background(),
-		opts,
 		testModelGenerator(50_000),
+		opts,
 		ho.DefaultConfig(),
 		// Hyperparameter ranges.
 		[]ho.ParameterRange[int]{
@@ -456,6 +454,8 @@ func TestBulkCreate_Channels(t *testing.T) {
 	opts, err := NewBulkOptions[*TestModel](
 		baseIndexName,
 		rawMessage,
+		WithMetricsCh[*TestModel](metricsChannel),
+		WithErrorCh[*TestModel](errorChannel),
 	)
 	assert.NoError(t, err)
 
@@ -465,7 +465,7 @@ func TestBulkCreate_Channels(t *testing.T) {
 	opts.FlushInterval = 1 * time.Second
 	opts.RetryOnFailure = 1
 
-	assert.NoError(t, ebi.BulkCreate(ctx, testDocs, opts, metricsChannel, errorChannel))
+	assert.NoError(t, ebi.BulkCreate(ctx, testDocs, opts))
 
 	// Will wait for goroutine to finish.
 	<-done

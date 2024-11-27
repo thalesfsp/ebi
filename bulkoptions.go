@@ -45,6 +45,11 @@ type BulkOptions[T any] struct {
 	// Metrics related.
 	MetricsCheck time.Duration `default:"5s" json:"metricsCheck" validate:"required"`
 
+	MetricsCh chan<- *Metrics
+
+	// Async error handling.
+	ErrorCh chan<- error
+
 	// Internals related.
 	FlushBytes     int           `json:"flushBytes" validate:"omitempty,gt=0"`
 	FlushInterval  time.Duration `default:"30s"     json:"flushInterval"      validate:"omitempty,gt=0"`
@@ -78,6 +83,20 @@ type BulkOptions[T any] struct {
 //////
 // Exported built-in options.
 //////
+
+// WithMetricsCh sets the metrics channel for the bulk indexing operation.
+func WithMetricsCh[T any](metricsCh chan<- *Metrics) BulkOptionsFunc[T] {
+	return func(o *BulkOptions[T]) {
+		o.MetricsCh = metricsCh
+	}
+}
+
+// WithErrorCh sets the error channel for the bulk indexing operation.
+func WithErrorCh[T any](errorCh chan<- error) BulkOptionsFunc[T] {
+	return func(o *BulkOptions[T]) {
+		o.ErrorCh = errorCh
+	}
+}
 
 // WithRefreshPolicy sets the refresh policy for the bulk indexing operation.
 func WithRefreshPolicy[T any](refreshPolicy RefreshPolicy) BulkOptionsFunc[T] {

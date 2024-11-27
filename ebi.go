@@ -54,17 +54,18 @@ func (ebi *EBI[T]) refreshIndex(ctx context.Context, indexName string) error {
 
 // BulkCreate indexes documents in Elasticsearch using the Bulk API.
 //
+// NOTE: Regarding BulkOptions, use NewBulkOptions to create a new instance.
+//
 //nolint:gocognit,maintidx,nestif
 func (ebi *EBI[T]) BulkCreate(
+	// Context to be used in the optimization.
 	ctx context.Context,
+
+	// Documents to be used in the optimization.
 	docs []T,
+
+	// Bulk options to be optimized.
 	opts *BulkOptions[T],
-
-	// For async metrics, optional.
-	metricsCh chan<- *Metrics,
-
-	// For async errors, optional.
-	errorCh chan<- error,
 ) error {
 	//////
 	// Validation.
@@ -140,17 +141,13 @@ func (ebi *EBI[T]) BulkCreate(
 	opts.FlushBytes = recommendedBatchSize * docSize
 
 	//////
-	// Pause feature.
-	//////
-
-	//////
 	// Internal helper.
 	//////
 
 	// Helper function to send async errors.
 	asyncErrorHandler := func(err error) {
-		if errorCh != nil {
-			errorCh <- err
+		if opts.ErrorCh != nil {
+			opts.ErrorCh <- err
 		}
 	}
 
@@ -238,8 +235,8 @@ func (ebi *EBI[T]) BulkCreate(
 					}
 
 					// Send metrics to the channel.
-					if metricsCh != nil {
-						metricsCh <- metrics
+					if opts.MetricsCh != nil {
+						opts.MetricsCh <- metrics
 					}
 				}
 
@@ -375,15 +372,17 @@ func (ebi *EBI[T]) BulkCreate(
 // HyperparameterOptimization runs a hyperparameter optimization
 // using the Gaussian Process and Upper Confidence Bound (UCB)
 // as acquisition function against batch size and number of workers.
+//
+// NOTE: Regarding BulkOptions, use NewBulkOptions to create a new instance.
 func (ebi *EBI[T]) HyperparameterOptimization(
 	// Context to be used in the optimization.
 	ctx context.Context,
 
-	// Bulk options to be optimized.
-	opts *BulkOptions[T],
-
 	// Documents to be used in the optimization.
 	docs []T,
+
+	// Bulk options to be optimized.
+	opts *BulkOptions[T],
 
 	// Optimization configuration.
 	optimizationConfig ho.OptimizationConfig,
@@ -404,8 +403,6 @@ func (ebi *EBI[T]) HyperparameterOptimization(
 			ctx,
 			docs,
 			opts,
-			nil,
-			nil,
 		); err != nil {
 			return err
 		}

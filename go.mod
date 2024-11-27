@@ -8,7 +8,6 @@ require (
 	github.com/thalesfsp/configurer v1.3.22
 	github.com/thalesfsp/customerror v1.2.9
 	github.com/thalesfsp/ho v0.0.1
-	github.com/thalesfsp/validation v0.0.3
 )
 
 require (
@@ -32,6 +31,7 @@ require (
 	github.com/pelletier/go-toml v1.9.5 // indirect
 	github.com/pmezard/go-difflib v1.0.1-0.20181226105442-5d4384ee4fb2 // indirect
 	github.com/thalesfsp/sypl v1.9.18 // indirect
+	github.com/thalesfsp/validation v0.0.3 // indirect
 	go.opentelemetry.io/otel v1.32.0 // indirect
 	go.opentelemetry.io/otel/metric v1.32.0 // indirect
 	go.opentelemetry.io/otel/trace v1.32.0 // indirect

@@ -1,5 +1,7 @@
 # ebi (Elasticsearch Bulk Indexer)
 
+![ebi](https://github.com/user-attachments/assets/97e359ae-3a76-48f8-b5db-9b3604bd4e6f)
+
 A powerful Go package for efficient bulk indexing in Elasticsearch that leverages machine learning for hyperparameter optimization. The package eliminates guesswork in ETL and data loading by automatically finding optimal indexing parameters through Bayesian optimization, while providing automated, metrics-driven bulk indexing with built-in circuit breakers and monitoring capabilities.
 
 ## Why Hyperparameter Optimization?

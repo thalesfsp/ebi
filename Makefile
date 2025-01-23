@@ -9,7 +9,8 @@ BIN_PATH := $(BIN_DIR)/$(BIN_NAME)
 
 HAS_GODOC := $(shell command -v godoc;)
 HAS_GOLANGCI := $(shell command -v golangci-lint;)
-HAS_GORELEASER := $(shell command -v goreleaser;)
+
+GOLANGCI_VERSION := v1.61.0
 
 default: ci
 
@@ -30,26 +31,23 @@ ifndef HAS_GODOC
 	@echo "Could not find godoc, installing it"
 	@go install golang.org/x/tools/cmd/godoc@latest
 endif
-	@echo "Open localhost:6060/pkg/github.com/thalesfsp/$(PROJECT_FULL_NAME)/ in your browser\n"
+	@echo "Open localhost:6060/pkg/github.com/thalesfsp/$(PROJECT_NAME)/ in your browser\n"
 	@godoc -http :6060
 
 lint:
 ifndef HAS_GOLANGCI
 	@echo "Could not find golangci-list, installing it"
-	@go install github.com/golangci/golangci-lint/cmd/golangci-lint@v1.61.0
+	@go install github.com/golangci/golangci-lint/cmd/golangci-lint@$(GOLANGCI_VERSION)
 endif
 	@golangci-lint run -v -c .golangci.yml && echo "Lint OK"
 
-release-local:
-ifndef HAS_GORELEASER
-	@echo "Could not find goreleaser, installing it"
-	@go install github.com/goreleaser/goreleaser/v2@v2.3.2
-endif
-	@goreleaser build --clean --snapshot && echo "Local release OK"
+test:
+	@VENDOR_ENVIRONMENT="testing" go test -timeout 30s -short -v -race -cover \
+	-coverprofile=coverage.out ./... && echo "Test OK"
 
 .PHONY: build \
 	build-dev \
 	ci \
 	doc \
 	lint \
-	release-local
+	test

@@ -84,6 +84,13 @@ type BulkOptions[T any] struct {
 // Exported built-in options.
 //////
 
+// WithMetricsCheck sets the metrics check for the bulk indexing operation.
+func WithMetricsCheck[T any](metricsCheck time.Duration) BulkOptionsFunc[T] {
+	return func(o *BulkOptions[T]) {
+		o.MetricsCheck = metricsCheck
+	}
+}
+
 // WithMetricsCh sets the metrics channel for the bulk indexing operation.
 func WithMetricsCh[T any](metricsCh chan<- *Metrics) BulkOptionsFunc[T] {
 	return func(o *BulkOptions[T]) {
@@ -147,6 +154,34 @@ func WithRefreshFunc[T any](refreshFunc RefreshFunc) BulkOptionsFunc[T] {
 	}
 }
 
+// WithBatchSize sets the batch size for the bulk indexing operation.
+func WithBatchSize[T any](batchSize int) BulkOptionsFunc[T] {
+	return func(o *BulkOptions[T]) {
+		o.BatchSize = batchSize
+	}
+}
+
+// WithFlushBytes sets the flush bytes for the bulk indexing operation.
+func WithFlushBytes[T any](flushBytes int) BulkOptionsFunc[T] {
+	return func(o *BulkOptions[T]) {
+		o.FlushBytes = flushBytes
+	}
+}
+
+// WithFlushInterval sets the flush interval for the bulk indexing operation.
+func WithFlushInterval[T any](flushInterval time.Duration) BulkOptionsFunc[T] {
+	return func(o *BulkOptions[T]) {
+		o.FlushInterval = flushInterval
+	}
+}
+
+// WithRetryOnFailure sets the retry on failure for the bulk indexing operation.
+func WithRetryOnFailure[T any](retryOnFailure int) BulkOptionsFunc[T] {
+	return func(o *BulkOptions[T]) {
+		o.RetryOnFailure = retryOnFailure
+	}
+}
+
 //////
 // Factory.
 //////
@@ -174,24 +209,25 @@ func NewBulkOptions[T any](
 	}
 
 	bO := &BulkOptions[T]{
-		Index:         indexName,
-		SampleDoc:     sampleDoc,
+		Index:     indexName,
+		SampleDoc: sampleDoc,
+
 		RefreshPolicy: opts.RefreshPolicy,
 
-		BatchSize:      0,
-		NumWorkers:     0,
-		FlushBytes:     0,
-		FlushInterval:  30 * time.Second,
-		MetricsCheck:   5 * time.Second,
+		BatchSize:      opts.BatchSize,
+		NumWorkers:     opts.NumWorkers,
+		FlushBytes:     opts.FlushBytes,
+		FlushInterval:  opts.FlushInterval,
+		MetricsCheck:   opts.MetricsCheck,
 		MetricsCh:      opts.MetricsCh,
 		ErrorCh:        opts.ErrorCh,
-		RetryOnFailure: 3,
+		RetryOnFailure: opts.RetryOnFailure,
 
 		DocumentIDFunc: opts.DocumentIDFunc,
 		IndexNameFunc:  opts.IndexNameFunc,
 		RoutingFunc:    opts.RoutingFunc,
 		PauseFunc:      opts.PauseFunc,
-		PauseDuration:  5 * time.Second,
+		PauseDuration:  opts.PauseDuration,
 		RefreshFunc:    opts.RefreshFunc,
 	}
 

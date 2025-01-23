@@ -157,7 +157,17 @@ func (ebi *EBI[T]) BulkCreate(
 
 	// Modify the index name if a function is provided.
 	if opts.IndexNameFunc != nil {
-		opts.Index = opts.IndexNameFunc(opts.Index)
+		indexName := opts.IndexNameFunc(opts.Index)
+
+		if indexName != "" {
+			opts.Index = indexName
+		}
+	}
+
+	if opts.Index == "" {
+		return ErrorCatalog.
+			MustGet(ErrIndexNameRequired).
+			NewRequiredError()
 	}
 
 	//////
@@ -336,12 +346,20 @@ func (ebi *EBI[T]) BulkCreate(
 
 		// Should allow to specify document ID.
 		if opts.DocumentIDFunc != nil {
-			bII.DocumentID = opts.DocumentIDFunc(doc)
+			id := opts.DocumentIDFunc(doc)
+
+			if id != "" {
+				bII.DocumentID = id
+			}
 		}
 
 		// Should allow to specify routing.
 		if opts.RoutingFunc != nil {
-			bII.Routing = opts.RoutingFunc(doc)
+			routing := opts.RoutingFunc(doc)
+
+			if routing != "" {
+				bII.Routing = routing
+			}
 		}
 
 		// Actually add the document to the bulk indexer.

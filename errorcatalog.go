@@ -21,6 +21,7 @@ const (
 	ErrFailedToRefreshIndex             = "ERR_FAILED_TO_REFRESH_INDEX"                // FailedTo.
 	ErrFailedToUpdateMetrics            = "ERR_FAILED_TO_UPDATE_METRICS"               // FailedTo.
 	ErrIndexerError                     = "ERR_INDEXER_ERROR"                          // New.
+	ErrIndexNameRequired                = "ERR_INDEX_NAME_REQUIRED"                    // Required.
 	ErrInvalidBulkOptions               = "ERR_INVALID_BULK_OPTIONS"                   // Invalid.
 )
 
@@ -38,6 +39,7 @@ var ErrorCatalog = customerror.
 	MustSet(ErrFailedToRefreshIndex, "refresh index").
 	MustSet(ErrFailedToUpdateMetrics, "update metrics").
 	MustSet(ErrIndexerError, "indexer error").
+	MustSet(ErrIndexNameRequired, "index name").
 	MustSet(ErrInvalidBulkOptions, "bulk options")
 
 //////

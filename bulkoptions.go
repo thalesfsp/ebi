@@ -183,6 +183,8 @@ func NewBulkOptions[T any](
 		FlushBytes:     0,
 		FlushInterval:  30 * time.Second,
 		MetricsCheck:   5 * time.Second,
+		MetricsCh:      opts.MetricsCh,
+		ErrorCh:        opts.ErrorCh,
 		RetryOnFailure: 3,
 
 		DocumentIDFunc: opts.DocumentIDFunc,

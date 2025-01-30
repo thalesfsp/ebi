@@ -230,3 +230,40 @@ func roundToNearestThousandDivisibleBy2(n int) int {
 func process(v any) error {
 	return util.Process(v)
 }
+
+// HandleChannel is a generic function to handle a channel with a callback
+// function.
+func HandleChannel[T any](
+	ctx context.Context,
+	workCh chan T,
+	errorCh chan error,
+	doneCh chan struct{},
+	cbFunc func(t T) error,
+	optionalDefaultCBFunc func() error,
+) {
+	for {
+		select {
+		case t, ok := <-workCh:
+			if !ok {
+				return
+			}
+
+			if cbFunc != nil {
+				if err := cbFunc(t); err != nil {
+					errorCh <- err
+				}
+			}
+		case <-ctx.Done(): // Stop loop if context is done
+			return
+		case <-doneCh: // Stop loop if done signal is received
+			return
+		default:
+			if optionalDefaultCBFunc != nil {
+				if err := optionalDefaultCBFunc(); err != nil {
+					// Use `err` to optionally stop the loop.
+					return
+				}
+			}
+		}
+	}
+}

@@ -182,6 +182,13 @@ func (ebi *EBI[T]) BulkCreate(
 		FlushBytes:    opts.FlushBytes,
 		FlushInterval: opts.FlushInterval,
 		OnError: func(_ context.Context, err error) {
+			defer func() {
+				// Ensures metrics channel is updated.
+				if opts.MetricsCh != nil {
+					opts.MetricsCh <- metrics
+				}
+			}()
+
 			// Update metrics.
 			metrics.IncrementErrorCount()
 
@@ -222,6 +229,14 @@ func (ebi *EBI[T]) BulkCreate(
 			case <-ctx.Done():
 				return
 			case <-metricsTicker.C:
+				defer func() {
+					// Ensures metrics channel is updated.
+					if opts.MetricsCh != nil {
+						opts.MetricsCh <- metrics
+					}
+				}()
+
+				// Bring ES metrics updating `metrics`.
 				if err := updateIndexMetrics(ctx, ebi.client, metrics); err != nil {
 					// Send this async error to the error channel.
 					asyncErrorHandler(
@@ -232,21 +247,16 @@ func (ebi *EBI[T]) BulkCreate(
 								customerror.WithTag("metricsloop.updateIndexMetrics"),
 							),
 					)
-				} else {
-					// Determine if we should pause the bulk indexer.
-					if opts.PauseFunc != nil {
-						if opts.PauseFunc(metrics) {
-							// Pause the if met conditions.
-							metrics.UpdateStatus(StatusPaused)
-						} else {
-							// Remove pause if conditions improves.
-							metrics.UpdateStatus(StatusRunning)
-						}
-					}
+				}
 
-					// Send metrics to the channel.
-					if opts.MetricsCh != nil {
-						opts.MetricsCh <- metrics
+				// Determine if we should pause the bulk indexer.
+				if opts.PauseFunc != nil {
+					if opts.PauseFunc(metrics) {
+						// Pause the if met conditions.
+						metrics.UpdateStatus(StatusPaused)
+					} else {
+						// Remove pause if conditions improves.
+						metrics.UpdateStatus(StatusRunning)
 					}
 				}
 
@@ -272,6 +282,13 @@ func (ebi *EBI[T]) BulkCreate(
 	//
 	// NOTE: This is a parallel, asynchronous, efficient indexing process.
 	for _, doc := range docs {
+		defer func() {
+			// Ensures metrics channel is updated.
+			if opts.MetricsCh != nil {
+				opts.MetricsCh <- metrics
+			}
+		}()
+
 		// Breaks the loop if the context errored by any reason.
 		if err := ctx.Err(); err != nil {
 			return err
@@ -312,6 +329,11 @@ func (ebi *EBI[T]) BulkCreate(
 			OnSuccess: func(_ context.Context, _ esutil.BulkIndexerItem, _ esutil.BulkIndexerResponseItem) {
 				// Update metrics.
 				metrics.IncreaseDocsSucceeded()
+
+				// Ensures metrics channel is updated.
+				if opts.MetricsCh != nil {
+					opts.MetricsCh <- metrics
+				}
 			},
 
 			// Document failed to index.
@@ -341,6 +363,11 @@ func (ebi *EBI[T]) BulkCreate(
 				metrics.IncreaseDocsFailed()
 
 				metrics.IncrementErrorCount()
+
+				// Ensures metrics channel is updated.
+				if opts.MetricsCh != nil {
+					opts.MetricsCh <- metrics
+				}
 			},
 		}
 
@@ -389,6 +416,11 @@ func (ebi *EBI[T]) BulkCreate(
 				customerror.WithField("failedDocs", stats.NumFailed),
 				customerror.WithTag("bulkCreate"),
 			)
+	}
+
+	// Ensures metrics channel is updated - one last time.
+	if opts.MetricsCh != nil {
+		opts.MetricsCh <- metrics
 	}
 
 	return nil

@@ -2,13 +2,10 @@ package ebi
 
 import (
 	"context"
-	"encoding/json"
 	"math"
 	"strings"
 
-	"github.com/elastic/go-elasticsearch/v8"
 	"github.com/thalesfsp/configurer/util"
-	"github.com/thalesfsp/customerror"
 )
 
 //////
@@ -160,35 +157,25 @@ func calculateSystemPressure(
 
 // updateIndexMetrics fetches node stats from Elasticsearch and
 // updates the provided IndexMetrics struct.
-func updateIndexMetrics(
+func updateIndexMetrics[T any](
 	ctx context.Context,
-	client *elasticsearch.Client,
+	ebi *EBI[T],
 	metrics *Metrics,
 ) error {
 	//////
 	// Nodes stats.
 	//////
 
-	nodesStats, err := client.Nodes.Stats(
-		client.Nodes.Stats.WithContext(ctx),
-		client.Nodes.Stats.WithMetric("jvm", "breaker", "indexing_pressure", "indices"),
-	)
+	ns, err := ebi.retrieveNodeStats(ctx, "jvm", "breaker", "indexing_pressure", "indices")
 	if err != nil {
-		return customerror.NewFailedToError("get nodes stats", customerror.WithError(err))
-	}
-
-	defer nodesStats.Body.Close()
-
-	var nodesStatsResp NodesStats
-	if err := json.NewDecoder(nodesStats.Body).Decode(&nodesStatsResp); err != nil {
-		return customerror.NewFailedToError("parse nodes stats", customerror.WithError(err))
+		return err
 	}
 
 	// Calculate, and update system pressure metrics.
-	calculateSystemPressure(metrics, nodesStatsResp)
+	calculateSystemPressure(metrics, *ns)
 
 	// Nodes stats.
-	metrics.NodeStats = &nodesStatsResp
+	metrics.NodeStats = ns
 
 	return nil
 }

@@ -1,6 +1,7 @@
 package ebi
 
 import (
+	"context"
 	"encoding/json"
 	"time"
 
@@ -29,6 +30,44 @@ const (
 	RefreshPolicyWaitFor RefreshPolicy = "wait_for"
 )
 
+// NumWorkersFunc calculates the number of workers based on the cluster configuration.
+type NumWorkersFunc func() (int, error)
+
+// NumWorkersByJVM calculates the number of workers based on the JVM heap size.
+func NumWorkersByJVM(metrics *Metrics) NumWorkersFunc {
+	return func() (int, error) {
+		jvmHeapSizeGB := float64(metrics.ramPerNodeGB) / 2
+
+		workersPerNode := int(jvmHeapSizeGB / 1)
+
+		if workersPerNode < 1 {
+			workersPerNode = 1
+		}
+
+		return workersPerNode, nil
+	}
+}
+
+// NumWorkersManual sets the number of workers manually.
+func NumWorkersManual(n int) NumWorkersFunc {
+	return func() (int, error) {
+		return n, nil
+	}
+}
+
+// NumWorkersAutoDiscovery calls ElasticSearch to discover the number of workers
+// based on the cluster.
+func NumWorkersAutoDiscovery[T any](ctx context.Context, ebi *EBI[T]) NumWorkersFunc {
+	return func() (int, error) {
+		n, err := ebi.discoverWokerNodes(ctx)
+		if err != nil {
+			return 0, err
+		}
+
+		return n, nil
+	}
+}
+
 // BulkOptions defines the options for bulk indexing.
 //
 // NOTE: Use NewBulkOptions() to create a new BulkOptions struct!
@@ -36,8 +75,8 @@ const (
 //nolint:lll
 type BulkOptions[T any] struct {
 	// These are options that can be used in the hyperparameter tuning.
-	BatchSize  int `json:"batchSize"`
-	NumWorkers int `json:"numWorkers"`
+	BatchSize  int            `json:"batchSize"`
+	NumWorkers NumWorkersFunc `json:"numWorkers"`
 
 	// Sample doc.
 	SampleDoc json.RawMessage `json:"sampleDoc" validate:"required"`
@@ -179,6 +218,13 @@ func WithFlushInterval[T any](flushInterval time.Duration) BulkOptionsFunc[T] {
 func WithRetryOnFailure[T any](retryOnFailure int) BulkOptionsFunc[T] {
 	return func(o *BulkOptions[T]) {
 		o.RetryOnFailure = retryOnFailure
+	}
+}
+
+// WithNumWorkers sets the number of workers for the bulk indexing operation.
+func WithNumWorkers[T any](numWorkers NumWorkersFunc) BulkOptionsFunc[T] {
+	return func(o *BulkOptions[T]) {
+		o.NumWorkers = numWorkers
 	}
 }
 

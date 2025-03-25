@@ -194,13 +194,15 @@ func TestBulkCreate(t *testing.T) {
 func TestHO_WithChannel(t *testing.T) {
 	t.Skip()
 
+	ctx := context.Background()
+
 	//////
 	// ES client setup.
 	//////
 
 	// Ideally use a pointer to the model.
 	ebi, err := New[*TestModel](
-		context.Background(),
+		ctx,
 		elasticsearch.Config{
 			APIKey:  apiKey,
 			CloudID: cloudID,
@@ -268,7 +270,7 @@ func TestHO_WithChannel(t *testing.T) {
 	//////
 
 	bestParams, err := ebi.HyperparameterOptimization(
-		context.Background(),
+		ctx,
 		testModelGenerator(50_000),
 		opts,
 		optimizationConfig,
@@ -383,7 +385,7 @@ func TestUpdateIndexMetrics(t *testing.T) {
 
 	assert.NoError(t, updateIndexMetrics(
 		context.Background(),
-		e.client,
+		e,
 		&metrics,
 	))
 
@@ -451,16 +453,17 @@ func TestBulkCreate_Channels(t *testing.T) {
 	testDocs := testModelGenerator(50_000)
 
 	// Create bulk options
-	opts, err := NewBulkOptions[*TestModel](
+	opts, err := NewBulkOptions(
 		baseIndexName,
 		rawMessage,
 		WithMetricsCh[*TestModel](metricsChannel),
 		WithErrorCh[*TestModel](errorChannel),
+		WithNumWorkers[*TestModel](NumWorkersAutoDiscovery(ctx, ebi)),
 	)
 	assert.NoError(t, err)
 
 	opts.BatchSize = 500
-	opts.NumWorkers = 1
+	opts.NumWorkers = NumWorkersManual(1)
 	opts.MetricsCheck = 300 * time.Millisecond
 	opts.FlushInterval = 1 * time.Second
 	opts.RetryOnFailure = 1
@@ -469,4 +472,27 @@ func TestBulkCreate_Channels(t *testing.T) {
 
 	// Will wait for goroutine to finish.
 	<-done
+}
+
+func TestDiscoverWorkers(t *testing.T) {
+	t.Skip()
+
+	// Create test context with timeout
+	ctx := context.Background()
+
+	// Initialize EBI client with test configuration.
+	ebi, err := New[*TestModel](
+		ctx,
+		elasticsearch.Config{
+			APIKey:  apiKey,
+			CloudID: cloudID,
+		},
+	)
+
+	assert.NotNil(t, ebi)
+	assert.NoError(t, err)
+
+	n, err := ebi.discoverWokerNodes(context.Background())
+	assert.NoError(t, err)
+	assert.NotZero(t, n)
 }

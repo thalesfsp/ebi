@@ -19,6 +19,7 @@ const (
 	ErrFailedToIndexDocument            = "ERR_FAILED_TO_INDEX_DOCUMENT"               // FailedTo.
 	ErrFailedToPing                     = "ERR_FAILED_TO_PING"                         // FailedTo.
 	ErrFailedToRefreshIndex             = "ERR_FAILED_TO_REFRESH_INDEX"                // FailedTo.
+	ErrFailedToRetrieveNumWorkers       = "ERR_FAILED_TO_RETRIEVE_NUM_WORKERS"         // FailedTo.
 	ErrFailedToUpdateMetrics            = "ERR_FAILED_TO_UPDATE_METRICS"               // FailedTo.
 	ErrIndexerError                     = "ERR_INDEXER_ERROR"                          // New.
 	ErrIndexNameRequired                = "ERR_INDEX_NAME_REQUIRED"                    // Required.
@@ -37,6 +38,7 @@ var ErrorCatalog = customerror.
 	MustSet(ErrFailedToIndexDocument, "index document").
 	MustSet(ErrFailedToPing, "ping").
 	MustSet(ErrFailedToRefreshIndex, "refresh index").
+	MustSet(ErrFailedToRetrieveNumWorkers, "retrieve number of worker nodes").
 	MustSet(ErrFailedToUpdateMetrics, "update metrics").
 	MustSet(ErrIndexerError, "indexer error").
 	MustSet(ErrIndexNameRequired, "index name").

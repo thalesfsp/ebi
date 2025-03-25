@@ -5,9 +5,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/elastic/go-elasticsearch/v8"
+	"github.com/elastic/go-elasticsearch/v8/esapi"
 	"github.com/elastic/go-elasticsearch/v8/esutil"
 	"github.com/thalesfsp/customerror"
 	"github.com/thalesfsp/ho"
@@ -48,6 +50,56 @@ func (ebi *EBI[T]) refreshIndex(ctx context.Context, indexName string) error {
 	return nil
 }
 
+// Retrieve the node stats from Elasticsearch.
+//
+// NOTE: Common metrics: "jvm", "breaker", "indexing_pressure", "indices".
+func (ebi *EBI[T]) retrieveNodeStats(ctx context.Context, metrics ...string) (*NodesStats, error) {
+	//////
+	// Nodes stats.
+	//////
+
+	opts := []func(*esapi.NodesStatsRequest){
+		ebi.client.Nodes.Stats.WithContext(ctx),
+	}
+
+	if len(metrics) > 0 {
+		opts = append(opts, ebi.client.Nodes.Stats.WithMetric(metrics...))
+	}
+
+	nodesStats, err := ebi.client.Nodes.Stats(opts...)
+	if err != nil {
+		return nil, customerror.NewFailedToError("get nodes stats", customerror.WithError(err))
+	}
+
+	defer nodesStats.Body.Close()
+
+	var nodesStatsResp NodesStats
+	if err := json.NewDecoder(nodesStats.Body).Decode(&nodesStatsResp); err != nil {
+		return nil, customerror.NewFailedToError("parse nodes stats", customerror.WithError(err))
+	}
+
+	return &nodesStatsResp, nil
+}
+
+// Discover the amount of data nodes.
+func (ebi *EBI[T]) discoverWokerNodes(ctx context.Context) (int, error) {
+	ns, err := ebi.retrieveNodeStats(ctx)
+	if err != nil {
+		return 0, err
+	}
+
+	// Count nodes that have the data role: "d" is usually included in the roles info.
+	dataNodes := 0
+
+	for _, node := range ns.Nodes {
+		if strings.Contains(strings.Join(node.Roles, ","), "data") {
+			dataNodes++
+		}
+	}
+
+	return dataNodes, nil
+}
+
 //////
 // Exported functionalities.
 //////
@@ -56,7 +108,7 @@ func (ebi *EBI[T]) refreshIndex(ctx context.Context, indexName string) error {
 //
 // NOTE: Regarding BulkOptions, use NewBulkOptions to create a new instance.
 //
-//nolint:gocognit,maintidx,nestif,gocyclo
+//nolint:gocognit,maintidx,gocyclo
 func (ebi *EBI[T]) BulkCreate(
 	// Context to be used in the optimization.
 	ctx context.Context,
@@ -99,7 +151,7 @@ func (ebi *EBI[T]) BulkCreate(
 	// Get initial node stats.
 	//////
 
-	if err := updateIndexMetrics(ctx, ebi.client, metrics); err != nil {
+	if err := updateIndexMetrics(ctx, ebi, metrics); err != nil {
 		return err
 	}
 
@@ -124,7 +176,8 @@ func (ebi *EBI[T]) BulkCreate(
 		opts.BatchSize = roundToNearestThousandDivisibleBy2(recommendedBatchSize)
 	}
 
-	if opts.NumWorkers == 0 {
+	// Calculate the number of workers based on the JVM heap size.
+	if opts.NumWorkers == nil {
 		jvmHeapSizeGB := float64(metrics.ramPerNodeGB) / 2
 
 		workersPerNode := int(jvmHeapSizeGB / 1)
@@ -134,7 +187,7 @@ func (ebi *EBI[T]) BulkCreate(
 		}
 
 		// Set number of workers.
-		opts.NumWorkers = metrics.numDataNodes * workersPerNode
+		opts.NumWorkers = NumWorkersManual(metrics.numDataNodes * workersPerNode)
 	}
 
 	// Set FlushBytes size.
@@ -171,6 +224,17 @@ func (ebi *EBI[T]) BulkCreate(
 	}
 
 	//////
+	// Number of worker nodes determination.
+	//////
+
+	ns, err := opts.NumWorkers()
+	if err != nil {
+		return ErrorCatalog.
+			MustGet(ErrFailedToRetrieveNumWorkers).
+			NewRequiredError()
+	}
+
+	//////
 	// BI Setup.
 	//////
 
@@ -178,7 +242,7 @@ func (ebi *EBI[T]) BulkCreate(
 	bi, err := esutil.NewBulkIndexer(esutil.BulkIndexerConfig{
 		Client:        ebi.client,
 		Index:         opts.Index,
-		NumWorkers:    opts.NumWorkers,
+		NumWorkers:    ns,
 		FlushBytes:    opts.FlushBytes,
 		FlushInterval: opts.FlushInterval,
 		OnError: func(_ context.Context, err error) {
@@ -237,7 +301,7 @@ func (ebi *EBI[T]) BulkCreate(
 				}()
 
 				// Bring ES metrics updating `metrics`.
-				if err := updateIndexMetrics(ctx, ebi.client, metrics); err != nil {
+				if err := updateIndexMetrics(ctx, ebi, metrics); err != nil {
 					// Send this async error to the error channel.
 					asyncErrorHandler(
 						ErrorCatalog.
@@ -451,7 +515,7 @@ func (ebi *EBI[T]) HyperparameterOptimization(
 	benchmarkFunc := func(params ...int) error {
 		// Parameters to be optimized.
 		opts.BatchSize = params[0]
-		opts.NumWorkers = params[1]
+		opts.NumWorkers = NumWorkersManual(params[1])
 
 		// We don't care about metrics, just the error, if any
 		// must be returned so the Gaussian Process can learn
@@ -468,7 +532,7 @@ func (ebi *EBI[T]) HyperparameterOptimization(
 	}
 
 	// Run optimization with chosen configuration.
-	optimalSize := ho.OptimizeHyperparameters[int](
+	optimalSize := ho.OptimizeHyperparameters(
 		optimizationConfig,
 		benchmarkFunc,
 		parameterRange...,

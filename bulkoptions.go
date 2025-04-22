@@ -103,6 +103,12 @@ type BulkOptions[T any] struct {
 	// DocumentIDFunc determines in the evaluation time the document ID.
 	DocumentIDFunc func(doct T) string `json:"-"`
 
+	// FlushEndFunc do something when flushing ends.
+	FlushEndFunc func(ctx context.Context) `json:"-"`
+
+	// FlushStartFunc do something when flushing starts.
+	FlushStartFunc func(ctx context.Context) context.Context `json:"-"`
+
 	// IndexNameFunc determines in the evaluation time the index name.
 	IndexNameFunc func(indexName string) string `json:"-"`
 
@@ -228,6 +234,20 @@ func WithNumWorkers[T any](numWorkers NumWorkersFunc) BulkOptionsFunc[T] {
 	}
 }
 
+// WithFlushEndFunc sets the flush end function for the bulk indexing operation.
+func WithFlushEndFunc[T any](flushEndFunc func(ctx context.Context)) BulkOptionsFunc[T] {
+	return func(o *BulkOptions[T]) {
+		o.FlushEndFunc = flushEndFunc
+	}
+}
+
+// WithFlushStartFunc sets the flush start function for the bulk indexing operation.
+func WithFlushStartFunc[T any](flushStartFunc func(ctx context.Context) context.Context) BulkOptionsFunc[T] {
+	return func(o *BulkOptions[T]) {
+		o.FlushStartFunc = flushStartFunc
+	}
+}
+
 //////
 // Factory.
 //////
@@ -261,20 +281,22 @@ func NewBulkOptions[T any](
 		RefreshPolicy: opts.RefreshPolicy,
 
 		BatchSize:      opts.BatchSize,
-		NumWorkers:     opts.NumWorkers,
+		ErrorCh:        opts.ErrorCh,
 		FlushBytes:     opts.FlushBytes,
 		FlushInterval:  opts.FlushInterval,
-		MetricsCheck:   opts.MetricsCheck,
 		MetricsCh:      opts.MetricsCh,
-		ErrorCh:        opts.ErrorCh,
+		MetricsCheck:   opts.MetricsCheck,
+		NumWorkers:     opts.NumWorkers,
 		RetryOnFailure: opts.RetryOnFailure,
 
 		DocumentIDFunc: opts.DocumentIDFunc,
+		FlushEndFunc:   opts.FlushEndFunc,
+		FlushStartFunc: opts.FlushStartFunc,
 		IndexNameFunc:  opts.IndexNameFunc,
-		RoutingFunc:    opts.RoutingFunc,
-		PauseFunc:      opts.PauseFunc,
 		PauseDuration:  opts.PauseDuration,
+		PauseFunc:      opts.PauseFunc,
 		RefreshFunc:    opts.RefreshFunc,
+		RoutingFunc:    opts.RoutingFunc,
 	}
 
 	if err := process(bO); err != nil {

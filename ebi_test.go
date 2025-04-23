@@ -52,24 +52,55 @@ func testModelGenerator(amount int) []*TestModel {
 func TestBulkCreate_WithChannelsAndFunctions(t *testing.T) {
 	t.Skip()
 
+	// Create test context with timeout
+	ctx := context.Background()
+
+	// Initialize channels with buffer to prevent blocking.
+	metricsCh := make(chan *Metrics, 2)
+	errorCh := make(chan error, 2)
+
+	// Start goroutine to collect metrics.
+	go func() {
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case metric, ok := <-metricsCh:
+				if !ok {
+					return
+				}
+
+				// Convert metric to pretty JSON and print that.
+				b, err := json.MarshalIndent(metric, "", "  ")
+				assert.NoError(t, err)
+
+				assert.NotEmpty(t, string(b))
+			case err, ok := <-errorCh:
+				if !ok {
+					return
+				}
+
+				t.Logf("Error: %v", err)
+
+				t.Fail()
+			}
+		}
+	}()
+
 	// Ideally use a pointer to the model.
 	ebi, err := New[*TestModel](
-		context.Background(),
+		ctx,
 		elasticsearch.Config{
-			APIKey:  apiKey,
-			CloudID: cloudID,
+			Addresses: []string{"http://localhost:9200"},
 		},
 	)
-	if err != nil {
-		t.Fatal(err)
-	}
+	assert.NotNil(t, ebi)
+	assert.NoError(t, err)
 
-	metricsCh := make(chan *Metrics)
-	defer close(metricsCh)
+	// Create test data
+	testDocs := testModelGenerator(100)
 
-	errorCh := make(chan error)
-	defer close(errorCh)
-
+	// Create bulk options
 	opts, err := NewBulkOptions(
 		// Base index name. Will be modified by the indexNameFunc.
 		baseIndexName,
@@ -80,19 +111,29 @@ func TestBulkCreate_WithChannelsAndFunctions(t *testing.T) {
 
 		// Dynamically modify the index name, not needed but recommended.
 		WithIndexNameFunc[*TestModel](func(indexName string) string {
-			return fmt.Sprintf("%s-%d", indexName, time.Now().Unix())
+			if indexName != "" {
+				return fmt.Sprintf("%s-%d", indexName, time.Now().Unix())
+			}
+
+			return ""
 		}),
 
 		// Dynamically modify the document ID, not needed but recommended.
 		WithDocumentIDFunc(func(doc *TestModel) string {
-			time.Sleep(1 * time.Second)
+			if doc != nil {
+				return fmt.Sprintf("%s-%d", doc.ID, time.Now().Unix())
+			}
 
-			return fmt.Sprintf("%s-%d", doc.ID, time.Now().Unix())
+			return ""
 		}),
 
 		// Dynamically set routing, optional.
 		WithRoutingFunc(func(doc *TestModel) string {
-			return fmt.Sprintf("%d", doc.Group)
+			if doc != nil {
+				return fmt.Sprintf("%d", doc.Group)
+			}
+
+			return ""
 		}),
 
 		// Optional, but set here for demonstration purposes.
@@ -100,52 +141,28 @@ func TestBulkCreate_WithChannelsAndFunctions(t *testing.T) {
 
 		// Optional, but set here for demonstration purposes.
 		WithErrorCh[*TestModel](errorCh),
+
+		// Optional, but set here for demonstration purposes.
+		WithBatchSize[*TestModel](500),
+
+		// Optional, but set here for demonstration purposes.
+		WithNumWorkers[*TestModel](NumWorkersAutoDiscovery(ctx, ebi)),
+
+		// Optional, but set here for demonstration purposes.
+		WithMetricsCheck[*TestModel](300*time.Millisecond),
+
+		// Optional, but set here for demonstration purposes.
+		WithFlushInterval[*TestModel](1*time.Second),
+
+		// Optional, but set here for demonstration purposes.
+		WithRetryOnFailure[*TestModel](1),
 	)
 	assert.NoError(t, err)
 
-	// Not needed, only for testing purposes.
-	opts.MetricsCheck = 100 * time.Millisecond
+	assert.NoError(t, ebi.BulkCreate(ctx, testDocs, opts))
 
-	// Go routine to do something with metrics and errors.
-	go func() {
-		// Receives metrics and print it.
-		for {
-			select {
-			// REMEMBER, you MUST check `ok` value to avoid deadlock!
-			case gm, ok := <-metricsCh:
-				if !ok {
-					return
-				}
-
-				t.Logf("Metrics: %+v\n", gm)
-
-			// REMEMBER, you MUST check `ok` value to avoid deadlock!
-			case err, ok := <-errorCh:
-				if !ok {
-					return
-				}
-
-				t.Logf("Error: %s\n", err)
-			}
-		}
-	}()
-
-	if err := ebi.BulkCreate(
-		context.Background(),
-		[]*TestModel{
-			{
-				ID:    "1",
-				Group: 1,
-			},
-			{
-				ID:    "2",
-				Group: 1,
-			},
-		},
-		opts,
-	); err != nil {
-		t.Fatal(err)
-	}
+	close(metricsCh)
+	close(errorCh)
 }
 
 func TestBulkCreate(t *testing.T) {
@@ -155,8 +172,7 @@ func TestBulkCreate(t *testing.T) {
 	ebi, err := New[*TestModel](
 		context.Background(),
 		elasticsearch.Config{
-			APIKey:  apiKey,
-			CloudID: cloudID,
+			Addresses: []string{"http://localhost:9200"},
 		},
 	)
 	if err != nil {
@@ -204,8 +220,7 @@ func TestHO_WithChannel(t *testing.T) {
 	ebi, err := New[*TestModel](
 		ctx,
 		elasticsearch.Config{
-			APIKey:  apiKey,
-			CloudID: cloudID,
+			Addresses: []string{"http://localhost:9200"},
 		},
 	)
 	if err != nil {
@@ -321,8 +336,7 @@ func TestHO(t *testing.T) {
 	ebi, err := New[*TestModel](
 		context.Background(),
 		elasticsearch.Config{
-			APIKey:  apiKey,
-			CloudID: cloudID,
+			Addresses: []string{"http://localhost:9200"},
 		},
 	)
 	if err != nil {
@@ -375,8 +389,7 @@ func TestUpdateIndexMetrics(t *testing.T) {
 	e, err := New[*TestModel](
 		context.Background(),
 		elasticsearch.Config{
-			APIKey:  apiKey,
-			CloudID: cloudID,
+			Addresses: []string{"http://localhost:9200"},
 		},
 	)
 	assert.NoError(t, err)
@@ -404,13 +417,8 @@ func TestBulkCreate_Channels(t *testing.T) {
 	metricsChannel := make(chan *Metrics, 100)
 	errorChannel := make(chan error, 100)
 
-	// Create done channel for graceful shutdown.
-	done := make(chan bool)
-
 	// Start goroutine to collect metrics.
 	go func() {
-		defer close(done)
-
 		for {
 			select {
 			case <-ctx.Done():
@@ -441,8 +449,7 @@ func TestBulkCreate_Channels(t *testing.T) {
 	ebi, err := New[*TestModel](
 		ctx,
 		elasticsearch.Config{
-			APIKey:  apiKey,
-			CloudID: cloudID,
+			Addresses: []string{"http://localhost:9200"},
 		},
 	)
 
@@ -469,9 +476,6 @@ func TestBulkCreate_Channels(t *testing.T) {
 	opts.RetryOnFailure = 1
 
 	assert.NoError(t, ebi.BulkCreate(ctx, testDocs, opts))
-
-	// Will wait for goroutine to finish.
-	<-done
 }
 
 func TestDiscoverWorkers(t *testing.T) {
@@ -484,8 +488,7 @@ func TestDiscoverWorkers(t *testing.T) {
 	ebi, err := New[*TestModel](
 		ctx,
 		elasticsearch.Config{
-			APIKey:  apiKey,
-			CloudID: cloudID,
+			Addresses: []string{"http://localhost:9200"},
 		},
 	)
 

@@ -488,6 +488,8 @@ func (ebi *EBI[T]) BulkCreate(
 			)
 	}
 
+	fmt.Printf("Stats: %+v\n", stats)
+
 	// Ensures metrics channel is updated - one last time.
 	if opts.MetricsCh != nil {
 		opts.MetricsCh <- metrics

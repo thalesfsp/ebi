@@ -364,14 +364,8 @@ func (ebi *EBI[T]) BulkCreate(
 			time.Sleep(opts.PauseDuration)
 		}
 
-		// Wrap for upsert: update with doc_as_upsert.
-		wrapper := map[string]interface{}{
-			"doc":           doc,
-			"doc_as_upsert": true,
-		}
-
 		// Convert document to JSON.
-		data, err := json.Marshal(wrapper)
+		data, err := json.Marshal(doc)
 		if err != nil {
 			// Update metrics.
 			metrics.IncrementErrorCount()

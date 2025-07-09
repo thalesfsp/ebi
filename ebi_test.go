@@ -630,7 +630,7 @@ func TestBulkCreate_indexUpdateDelete(t *testing.T) {
 	// Update the documents with new values.
 	// Use map[string]interface{} for true partial updates to avoid
 	// setting zero values for omitted fields.
-	updatedDocs := []map[string]interface{}{
+	updatedDocs := []map[string]any{
 		{
 			"id":    "1",
 			"group": 3, // Updated value - only this field will be updated.

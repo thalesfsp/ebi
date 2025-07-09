@@ -147,7 +147,13 @@ func (ebi *EBI[T]) discoverWorkerNodes(ctx context.Context) (int, error) {
 
 // BulkCreate indexes documents in Elasticsearch using the Bulk API.
 //
-// NOTE: Regarding BulkOptions, use NewBulkOptions to create a new instance.
+// Partial Updates:
+//
+// Updates are full. For partial updates, `DocAsUpsert` must be `true`.
+// Take care on passing a typed struct, fields must have omitempty otherwise will
+// empty fields!
+//
+// WARN: Regarding BulkOptions, use NewBulkOptions to create a new instance.
 //
 //nolint:gocognit,maintidx,gocyclo
 func (ebi *EBI[T]) BulkCreate(
@@ -418,10 +424,10 @@ func (ebi *EBI[T]) BulkCreate(
 		)
 
 		switch opts.Operation {
-		case "index", "create":
+		case Index, Create:
 			// For index and create operations, we can use the document directly.
 			data, opErr = json.Marshal(doc)
-		case "update":
+		case Update:
 			// For update operations, wrap the document in a "doc" field.
 			updateBody := map[string]any{
 				"doc": doc,
@@ -434,7 +440,7 @@ func (ebi *EBI[T]) BulkCreate(
 			}
 
 			data, opErr = json.Marshal(updateBody)
-		case "delete":
+		case Delete:
 			// For delete operations, no body is needed.
 			data = nil
 		default:

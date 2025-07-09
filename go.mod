@@ -8,6 +8,7 @@ require (
 	github.com/thalesfsp/configurer v1.3.27
 	github.com/thalesfsp/customerror v1.2.9
 	github.com/thalesfsp/ho v0.0.1
+	github.com/thalesfsp/sypl v1.19.20
 )
 
 require (
@@ -29,7 +30,6 @@ require (
 	github.com/mattn/go-isatty v0.0.20 // indirect
 	github.com/pelletier/go-toml v1.9.5 // indirect
 	github.com/pmezard/go-difflib v1.0.1-0.20181226105442-5d4384ee4fb2 // indirect
-	github.com/thalesfsp/sypl v1.19.20 // indirect
 	github.com/thalesfsp/validation v0.0.3 // indirect
 	go.opentelemetry.io/auto/sdk v1.1.0 // indirect
 	go.opentelemetry.io/otel v1.35.0 // indirect

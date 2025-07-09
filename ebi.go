@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"fmt"
 	"strings"
 	"time"
 
@@ -13,38 +12,54 @@ import (
 	"github.com/elastic/go-elasticsearch/v8/esutil"
 	"github.com/thalesfsp/customerror"
 	"github.com/thalesfsp/ho"
+	"github.com/thalesfsp/sypl"
+	"github.com/thalesfsp/sypl/level"
 )
 
 //////
 // Const, vars, and types.
 //////
 
+// Type of the entity.
+const Type = "ebi"
+
 // PauseFunc determines the conditions to pause the indexing process.
 type PauseFunc func(metrics *Metrics) bool
 
-// RefreshFunc determines the conditions to refresh the index. A good metrics
+// RefreshFunc determines the conditions to refresh the index. A good metric
 // for that is the TranslogSize.
 type RefreshFunc func(ctx context.Context, metrics *Metrics) bool
 
-// EBI is a struct that contains the Elasticsearch client.
+// EBI (Elasticsearch Bulk Indexer) is a generic struct that provides efficient
+// bulk indexing capabilities for Elasticsearch. It contains an Elasticsearch client
+// and logger for performing high-performance bulk operations with built-in monitoring
+// and optimization features.
 type EBI[T any] struct {
+	logger sypl.ISypl
+
 	client *elasticsearch.Client
 }
 
-// Refresh the index freeing up translog space.
+// refreshIndex refreshes the specified Elasticsearch index, freeing up translog space.
+// This operation forces a refresh to make recently indexed documents searchable
+// and helps manage memory usage during bulk indexing operations.
 func (ebi *EBI[T]) refreshIndex(ctx context.Context, indexName string) error {
 	res, err := ebi.client.Indices.Refresh(
 		ebi.client.Indices.Refresh.WithContext(ctx),
 		ebi.client.Indices.Refresh.WithIndex(indexName),
 	)
 	if err != nil {
-		return err
+		return ErrorCatalog.
+			MustGet(ErrFailedToRefreshIndex).
+			NewFailedToError(customerror.WithError(err))
 	}
 
 	defer res.Body.Close()
 
 	if res.IsError() {
-		return fmt.Errorf("failed to refresh index: %s", res.String())
+		return ErrorCatalog.
+			MustGet(ErrFailedToRefreshIndex).
+			NewFailedToError(customerror.WithField("response", res.String()))
 	}
 
 	return nil
@@ -68,27 +83,35 @@ func (ebi *EBI[T]) retrieveNodeStats(ctx context.Context, metrics ...string) (*N
 
 	nodesStats, err := ebi.client.Nodes.Stats(opts...)
 	if err != nil {
-		return nil, customerror.NewFailedToError("get nodes stats", customerror.WithError(err))
+		return nil, ErrorCatalog.
+			MustGet(ErrFailedToGetNodeStats).
+			NewFailedToError(customerror.WithError(err))
 	}
 
 	defer nodesStats.Body.Close()
 
 	var nodesStatsResp NodesStats
 	if err := json.NewDecoder(nodesStats.Body).Decode(&nodesStatsResp); err != nil {
-		return nil, customerror.NewFailedToError("parse nodes stats", customerror.WithError(err))
+		return nil, ErrorCatalog.
+			MustGet(ErrFailedToParseNodeStats).
+			NewFailedToError(customerror.WithError(err))
 	}
 
 	return &nodesStatsResp, nil
 }
 
-// Discover the amount of data nodes.
-func (ebi *EBI[T]) discoverWokerNodes(ctx context.Context) (int, error) {
+// discoverWorkerNodes discovers and counts the number of data nodes in the ES cluster.
+// Data nodes are responsible for holding data and performing data-related operations.
+// This count is used to calculate the optimal number of workers for bulk indexing.
+func (ebi *EBI[T]) discoverWorkerNodes(ctx context.Context) (int, error) {
 	ns, err := ebi.retrieveNodeStats(ctx)
 	if err != nil {
-		return 0, err
+		return 0, ErrorCatalog.
+			MustGet(ErrFailedToDiscoverNodes).
+			NewFailedToError(customerror.WithError(err))
 	}
 
-	// Count nodes that have the data role: "d" is usually included in the roles info.
+	// Count nodes that have the data role: "data" is included in the roles list.
 	dataNodes := 0
 
 	for _, node := range ns.Nodes {
@@ -110,13 +133,13 @@ func (ebi *EBI[T]) discoverWokerNodes(ctx context.Context) (int, error) {
 //
 //nolint:gocognit,maintidx,gocyclo
 func (ebi *EBI[T]) BulkCreate(
-	// Context to be used in the optimization.
+	// Context to be used for the bulk indexing operation.
 	ctx context.Context,
 
-	// Documents to be used in the optimization.
+	// Documents to be indexed in Elasticsearch.
 	docs []T,
 
-	// Bulk options to be optimized.
+	// Bulk options to configure the indexing process.
 	opts *BulkOptions[T],
 ) error {
 	//////
@@ -144,7 +167,9 @@ func (ebi *EBI[T]) BulkCreate(
 	// Initialize metrics.
 	metrics, err := NewMetrics()
 	if err != nil {
-		return err
+		return ErrorCatalog.
+			MustGet(ErrFailedToCreateMetrics).
+			NewFailedToError(customerror.WithError(err))
 	}
 
 	//////
@@ -152,7 +177,9 @@ func (ebi *EBI[T]) BulkCreate(
 	//////
 
 	if err := updateIndexMetrics(ctx, ebi, metrics); err != nil {
-		return err
+		return ErrorCatalog.
+			MustGet(ErrFailedToUpdateMetrics).
+			NewFailedToError(customerror.WithError(err))
 	}
 
 	//////
@@ -300,7 +327,7 @@ func (ebi *EBI[T]) BulkCreate(
 					}
 				}()
 
-				// Bring ES metrics updating `metrics`.
+				// Update ES metrics by updating `metrics`.
 				if err := updateIndexMetrics(ctx, ebi, metrics); err != nil {
 					// Send this async error to the error channel.
 					asyncErrorHandler(
@@ -316,10 +343,10 @@ func (ebi *EBI[T]) BulkCreate(
 				// Determine if we should pause the bulk indexer.
 				if opts.PauseFunc != nil {
 					if opts.PauseFunc(metrics) {
-						// Pause the if met conditions.
+						// Pause if conditions are met.
 						metrics.UpdateStatus(StatusPaused)
 					} else {
-						// Remove pause if conditions improves.
+						// Remove pause if conditions improve.
 						metrics.UpdateStatus(StatusRunning)
 					}
 				}
@@ -330,7 +357,7 @@ func (ebi *EBI[T]) BulkCreate(
 						// Send this async error to the error channel.
 						asyncErrorHandler(
 							ErrorCatalog.
-								MustGet(ErrFailedToUpdateMetrics).
+								MustGet(ErrFailedToRefreshIndex).
 								NewFailedToError(
 									customerror.WithError(err),
 									customerror.WithTag("metricsloop.refreshIndex"),
@@ -355,18 +382,52 @@ func (ebi *EBI[T]) BulkCreate(
 
 		// Breaks the loop if the context errored by any reason.
 		if err := ctx.Err(); err != nil {
-			return err
+			return ErrorCatalog.
+				MustGet(ErrContextCancelled).
+				NewFailedToError(customerror.WithError(err))
 		}
 
-		// Thread-safe check if the bulk indexer should be pause. If status is
-		// to "paused", then it pauses.
+		// Thread-safe check if the bulk indexer should be paused. If status is
+		// "paused", then it pauses.
 		if metrics.GetMetrics().Status == StatusPaused {
 			time.Sleep(opts.PauseDuration)
 		}
 
-		// Convert document to JSON.
-		data, err := json.Marshal(doc)
-		if err != nil {
+		// Properly marshal the document to JSON according to the operation type.
+		var (
+			data  []byte
+			opErr error
+		)
+
+		switch opts.Operation {
+		case "index", "create":
+			// For index and create operations, we can use the document directly.
+			data, opErr = json.Marshal(doc)
+		case "update":
+			// For update operations, wrap the document in a "doc" field.
+			updateBody := map[string]any{
+				"doc": doc,
+			}
+
+			// Add upsert behavior if enabled.
+			if opts.DocAsUpsert {
+				updateBody["doc_as_upsert"] = true
+			}
+
+			data, opErr = json.Marshal(updateBody)
+		case "delete":
+			// For delete operations, no body is needed.
+			data = nil
+		default:
+			return ErrorCatalog.
+				MustGet(ErrInvalidOperation).
+				NewFailedToError(
+					customerror.WithField("operation", opts.Operation),
+					customerror.WithTag("ebi.BulkCreate"),
+				)
+		}
+
+		if opErr != nil {
 			// Update metrics.
 			metrics.IncrementErrorCount()
 
@@ -375,7 +436,7 @@ func (ebi *EBI[T]) BulkCreate(
 				ErrorCatalog.
 					MustGet(ErrFailedToConvertToJSON).
 					NewFailedToError(
-						customerror.WithError(err),
+						customerror.WithError(opErr),
 						customerror.WithTag("json.Marshal"),
 					),
 			)
@@ -385,8 +446,7 @@ func (ebi *EBI[T]) BulkCreate(
 		}
 
 		bII := esutil.BulkIndexerItem{
-			Action: "index",
-			Body:   bytes.NewReader(data),
+			Action: opts.Operation, // e.g.: "index", "update", "delete", etc.
 			Index:  opts.Index,
 
 			// Document successfully indexed.
@@ -435,7 +495,8 @@ func (ebi *EBI[T]) BulkCreate(
 			},
 		}
 
-		// Should allow to specify document ID.
+		// Should allow to specify document ID. If the document ID is not set,
+		// it will be generated by Elasticsearch.
 		if opts.DocumentIDFunc != nil {
 			id := opts.DocumentIDFunc(doc)
 
@@ -453,6 +514,11 @@ func (ebi *EBI[T]) BulkCreate(
 			}
 		}
 
+		// Set body only if we have data (not for delete operations)
+		if data != nil {
+			bII.Body = bytes.NewReader(data)
+		}
+
 		// Actually add the document to the bulk indexer.
 		if err := bi.Add(ctx, bII); err != nil {
 			return ErrorCatalog.
@@ -466,7 +532,10 @@ func (ebi *EBI[T]) BulkCreate(
 		// Update metrics.
 		metrics.IncreaseDocsProcessed()
 
-		metrics.UpdateBytesProcessed(int64(len(data)))
+		// Update bytes processed only if we have data
+		if data != nil {
+			metrics.UpdateBytesProcessed(int64(len(data)))
+		}
 	}
 
 	// Final statistics.
@@ -482,7 +551,7 @@ func (ebi *EBI[T]) BulkCreate(
 			)
 	}
 
-	fmt.Printf("Stats: %+v\n", stats)
+	ebi.logger.Debuglnf("Stats: %+v", stats)
 
 	// Ensures metrics channel is updated - one last time.
 	if opts.MetricsCh != nil {
@@ -513,7 +582,7 @@ func (ebi *EBI[T]) HyperparameterOptimization(
 	// Parameter range to be optimized.
 	parameterRange []ho.ParameterRange[int],
 ) ([]int, error) {
-	// Your benchmark function
+	// Benchmark function that tests different parameter combinations.
 	benchmarkFunc := func(params ...int) error {
 		// Parameters to be optimized.
 		opts.BatchSize = params[0]
@@ -527,7 +596,9 @@ func (ebi *EBI[T]) HyperparameterOptimization(
 			docs,
 			opts,
 		); err != nil {
-			return err
+			return ErrorCatalog.
+				MustGet(ErrHyperparameterOptimization).
+				NewFailedToError(customerror.WithError(err))
 		}
 
 		return nil
@@ -547,7 +618,9 @@ func (ebi *EBI[T]) HyperparameterOptimization(
 // Factory.
 //////
 
-// New returns a new ebi.
+// New creates and returns a new EBI (Elasticsearch Bulk Indexer) instance.
+// It initializes the Elasticsearch client, tests the connection, and sets up
+// logging.
 func New[T any](
 	ctx context.Context,
 	esConfig elasticsearch.Config,
@@ -572,5 +645,8 @@ func New[T any](
 
 	return &EBI[T]{
 		client: client,
+
+		// Default level prints nothing.
+		logger: sypl.NewDefault(Type, level.None),
 	}, nil
 }

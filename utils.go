@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/thalesfsp/configurer/util"
+	"github.com/thalesfsp/customerror"
 )
 
 //////
@@ -168,7 +169,9 @@ func updateIndexMetrics[T any](
 
 	ns, err := ebi.retrieveNodeStats(ctx, "jvm", "breaker", "indexing_pressure", "indices")
 	if err != nil {
-		return err
+		return ErrorCatalog.
+			MustGet(ErrFailedToUpdateMetrics).
+			NewFailedToError(customerror.WithError(err))
 	}
 
 	// Calculate, and update system pressure metrics.

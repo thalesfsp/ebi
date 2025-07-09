@@ -59,7 +59,7 @@ func NumWorkersManual(n int) NumWorkersFunc {
 // based on the cluster.
 func NumWorkersAutoDiscovery[T any](ctx context.Context, ebi *EBI[T]) NumWorkersFunc {
 	return func() (int, error) {
-		n, err := ebi.discoverWokerNodes(ctx)
+		n, err := ebi.discoverWorkerNodes(ctx)
 		if err != nil {
 			return 0, err
 		}
@@ -111,6 +111,16 @@ type BulkOptions[T any] struct {
 
 	// IndexNameFunc determines in the evaluation time the index name.
 	IndexNameFunc func(indexName string) string `json:"-"`
+
+	// Operation determines the operation to be performed on the document(s),
+	// e.g.: index, update, etc. For `update` operations, you may want to set
+	// the `DocAsUpsert` option to true using `WithDocAsUpsert(true)`.
+	Operation string `default:"index" json:"operation" validate:"omitempty"`
+
+	// DocAsUpsert determines whether to use upsert behavior for update
+	// operations. When true, if the document doesn't exist, it will be created.
+	// It only applies to `update` "Operation".
+	DocAsUpsert bool `default:"false" json:"docAsUpsert"`
 
 	// RoutingFunc determines in the evaluation time the routing value.
 	RoutingFunc func(doct T) string `json:"-"`
@@ -248,6 +258,23 @@ func WithFlushStartFunc[T any](flushStartFunc func(ctx context.Context) context.
 	}
 }
 
+// WithOperation sets the operation for the bulk indexing operation.
+func WithOperation[T any](operation string) BulkOptionsFunc[T] {
+	return func(o *BulkOptions[T]) {
+		o.Operation = operation
+	}
+}
+
+// WithDocAsUpsert sets the doc_as_upsert behavior for update operations.
+//
+// NOTE: This option only applies to `update` operations. When set to true,
+// if the document doesn't exist, it will be created.
+func WithDocAsUpsert[T any](docAsUpsert bool) BulkOptionsFunc[T] {
+	return func(o *BulkOptions[T]) {
+		o.DocAsUpsert = docAsUpsert
+	}
+}
+
 //////
 // Factory.
 //////
@@ -278,6 +305,8 @@ func NewBulkOptions[T any](
 		Index:     indexName,
 		SampleDoc: sampleDoc,
 
+		Operation: opts.Operation,
+
 		RefreshPolicy: opts.RefreshPolicy,
 
 		BatchSize:      opts.BatchSize,
@@ -300,7 +329,9 @@ func NewBulkOptions[T any](
 	}
 
 	if err := process(bO); err != nil {
-		return nil, customerror.NewInvalidError("bulk options", customerror.WithError(err))
+		return nil, ErrorCatalog.
+			MustGet(ErrInvalidBulkOptions).
+			NewInvalidError(customerror.WithError(err))
 	}
 
 	return bO, nil

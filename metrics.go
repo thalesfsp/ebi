@@ -196,7 +196,9 @@ func NewMetrics() (*Metrics, error) {
 	}
 
 	if err := process(m); err != nil {
-		return nil, customerror.NewInvalidError("metrics", customerror.WithError(err))
+		return nil, ErrorCatalog.
+			MustGet(ErrInvalidMetrics).
+			NewInvalidError(customerror.WithError(err))
 	}
 
 	return m, nil

@@ -23,6 +23,24 @@ import (
 // Type of the entity.
 const Type = "ebi"
 
+// Operation represents the type of operation to be bulkly performed.
+type Operation string
+
+const (
+	// Index is the default bulk operation.
+	Index = "index"
+
+	// Create documents, failing if it already exists.
+	Create = "create"
+
+	// Update is used to update documents. Control upsert behavious with the
+	// option.
+	Update = "update"
+
+	// Delete is used to delete a documents.
+	Delete = "delete"
+)
+
 // PauseFunc determines the conditions to pause the indexing process.
 type PauseFunc func(metrics *Metrics) bool
 

@@ -118,9 +118,11 @@ type BulkOptions[T any] struct {
 	Operation string `default:"index" json:"operation" validate:"omitempty"`
 
 	// DocAsUpsert determines whether to use upsert behavior for update
-	// operations. When true, if the document doesn't exist, it will be created.
-	// It only applies to `update` "Operation".
-	DocAsUpsert bool `default:"false" json:"docAsUpsert"`
+	// operations. Default to `true` - if the document doesn't exist, it will be
+	// created.
+	//
+	// NOTE: It only applies to `update` "Operation".
+	DocAsUpsert bool `default:"true" json:"docAsUpsert"`
 
 	// RoutingFunc determines in the evaluation time the routing value.
 	RoutingFunc func(doct T) string `json:"-"`
@@ -265,10 +267,8 @@ func WithOperation[T any](operation string) BulkOptionsFunc[T] {
 	}
 }
 
-// WithDocAsUpsert sets the doc_as_upsert behavior for update operations.
-//
-// NOTE: This option only applies to `update` operations. When set to true,
-// if the document doesn't exist, it will be created.
+// WithDocAsUpsert sets the DocAsUpsert behaviour for update operations. Default
+// to `true` - if the document doesn't exist, it will be created.
 func WithDocAsUpsert[T any](docAsUpsert bool) BulkOptionsFunc[T] {
 	return func(o *BulkOptions[T]) {
 		o.DocAsUpsert = docAsUpsert

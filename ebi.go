@@ -427,7 +427,8 @@ func (ebi *EBI[T]) BulkCreate(
 				"doc": doc,
 			}
 
-			// Add upsert behavior if enabled.
+			// Sets doc_as_upsert behavior only if enabled.
+			// For true partial updates, omit doc_as_upsert entirely when false.
 			if opts.DocAsUpsert {
 				updateBody["doc_as_upsert"] = true
 			}

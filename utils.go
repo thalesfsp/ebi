@@ -229,7 +229,6 @@ func HandleChannel[T any](
 	errorCh chan error,
 	doneCh chan struct{},
 	cbFunc func(t T) error,
-	optionalDefaultCBFunc func() error,
 ) {
 	for {
 		select {
@@ -247,13 +246,6 @@ func HandleChannel[T any](
 			return
 		case <-doneCh: // Stop loop if done signal is received
 			return
-		default:
-			if optionalDefaultCBFunc != nil {
-				if err := optionalDefaultCBFunc(); err != nil {
-					// Use `err` to optionally stop the loop.
-					return
-				}
-			}
 		}
 	}
 }

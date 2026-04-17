@@ -25,12 +25,14 @@ func TestHandleChannel_ErrorSendDoesNotDeadlockWhenReaderGone(t *testing.T) {
 	// Kill the error reader immediately to simulate the post-ctx-cancel state
 	// where the reader has already exited.
 	readerDone := make(chan struct{})
+
 	go func() {
 		// Reader that exits on ctx cancel (same pattern as UVS's error handler).
 		for {
 			select {
 			case <-ctx.Done():
 				close(readerDone)
+
 				return
 			case err := <-errorCh:
 				// Drop it — simulates early reader exit by not processing.
@@ -50,10 +52,12 @@ func TestHandleChannel_ErrorSendDoesNotDeadlockWhenReaderGone(t *testing.T) {
 	// With the fix, HandleChannel must return promptly (because ctx is already
 	// cancelled). Without the fix, the errorCh <- err send blocks forever.
 	workerDone := make(chan struct{})
+
 	go func() {
 		HandleChannel(ctx, workCh, errorCh, doneCh, func(_ int) error {
 			return errors.New("forced")
 		})
+
 		close(workerDone)
 	}()
 
@@ -75,16 +79,19 @@ func TestHandleChannel_NilErrorChDoesNotPanic(t *testing.T) {
 
 	workCh := make(chan int, 1)
 	workCh <- 1
+
 	close(workCh)
 
 	doneCh := make(chan struct{})
 
 	// No panic, no hang — even though cbFunc returns an error and errorCh is nil.
 	done := make(chan struct{})
+
 	go func() {
 		HandleChannel(ctx, workCh, nil, doneCh, func(_ int) error {
 			return errors.New("forced")
 		})
+
 		close(done)
 	}()
 
@@ -133,15 +140,18 @@ func TestHandleChannel_DoneChCancelsErrorSend(t *testing.T) {
 	doneCh := make(chan struct{})
 
 	workerDone := make(chan struct{})
+
 	go func() {
 		HandleChannel(ctx, workCh, errorCh, doneCh, func(_ int) error {
 			return errors.New("forced")
 		})
+
 		close(workerDone)
 	}()
 
 	// Close doneCh mid-stuck-send.
 	time.Sleep(50 * time.Millisecond) // let the worker get to the send.
+
 	close(doneCh)
 
 	select {
@@ -161,10 +171,13 @@ func TestAsyncErrorSend_DoesNotBlockOnCtxCancel(t *testing.T) {
 	errorCh := make(chan error) // unbuffered, no reader.
 
 	done := make(chan struct{})
+
 	go func() {
 		defer close(done)
+
 		// With ctx already cancelled this must return false quickly.
 		cancel()
+
 		if asyncErrorSend(ctx, errorCh, errors.New("forced")) {
 			t.Errorf("asyncErrorSend reported delivery when ctx was cancelled")
 		}
@@ -209,8 +222,10 @@ func TestAsyncErrorSend_NoPanicOnNilChannel(t *testing.T) {
 	defer cancel()
 
 	done := make(chan struct{})
+
 	go func() {
 		defer close(done)
+
 		if asyncErrorSend(ctx, nil, errors.New("forced")) {
 			t.Errorf("asyncErrorSend reported delivery on nil channel")
 		}

@@ -141,6 +141,26 @@ func (ebi *EBI[T]) discoverWorkerNodes(ctx context.Context) (int, error) {
 	return dataNodes, nil
 }
 
+// asyncErrorSend sends err to errorCh without blocking if ctx is cancelled
+// or errorCh is nil. Returns true if the error was delivered, false if
+// ctx cancelled first or errorCh was nil.
+//
+// This is the deadlock-safe counterpart to a bare `errorCh <- err` send:
+// callers can signal an error asynchronously without risking a hang when
+// the reader goroutine has already exited (e.g. on context cancellation).
+func asyncErrorSend(ctx context.Context, errorCh chan<- error, err error) bool {
+	if errorCh == nil {
+		return false
+	}
+
+	select {
+	case errorCh <- err:
+		return true
+	case <-ctx.Done():
+		return false
+	}
+}
+
 //////
 // Exported functionalities.
 //////
@@ -249,10 +269,13 @@ func (ebi *EBI[T]) BulkCreate(
 	//////
 
 	// Helper function to send async errors.
+	//
+	// Delegates to asyncErrorSend so the error send is ctx-aware — if the
+	// reader goroutine has already exited (e.g. on context cancellation)
+	// we won't deadlock on an unbuffered ErrorCh. See asyncErrorSend for
+	// the rationale and the production incident it guards against.
 	asyncErrorHandler := func(err error) {
-		if opts.ErrorCh != nil {
-			opts.ErrorCh <- err
-		}
+		_ = asyncErrorSend(ctx, opts.ErrorCh, err)
 	}
 
 	//////

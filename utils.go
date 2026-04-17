@@ -223,6 +223,12 @@ func process(v any) error {
 
 // HandleChannel is a generic function to handle a channel with a callback
 // function.
+//
+// The error send on errorCh is guarded by a select on ctx.Done() and doneCh
+// so the worker does not deadlock if the error-reader goroutine has already
+// exited (e.g. on context cancellation). If errorCh is nil, errors from
+// cbFunc are silently dropped rather than panicking or blocking forever on
+// a send-to-nil-channel.
 func HandleChannel[T any](
 	ctx context.Context,
 	workCh chan T,
@@ -239,7 +245,22 @@ func HandleChannel[T any](
 
 			if cbFunc != nil {
 				if err := cbFunc(t); err != nil {
-					errorCh <- err
+					// Silently drop if no error channel is configured.
+					// Matches the guard in asyncErrorSend and prevents a
+					// send-to-nil-channel hang.
+					if errorCh == nil {
+						continue
+					}
+
+					// Guard the error send so a cancelled context or a
+					// closed doneCh unblocks us if the reader is gone.
+					select {
+					case errorCh <- err:
+					case <-ctx.Done():
+						return
+					case <-doneCh:
+						return
+					}
 				}
 			}
 		case <-ctx.Done(): // Stop loop if context is done

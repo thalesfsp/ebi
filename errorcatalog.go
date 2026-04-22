@@ -32,6 +32,7 @@ const (
 	ErrInvalidBulkOptions               = "ERR_INVALID_BULK_OPTIONS"                   // Invalid.
 	ErrInvalidMetrics                   = "ERR_INVALID_METRICS"                        // Invalid.
 	ErrInvalidOperation                 = "ERR_INVALID_OPERATION"                      // Invalid.
+	ErrSampleDocRequired                = "ERR_SAMPLE_DOC_REQUIRED"                    // Required.
 )
 
 // ErrorCatalog is the error catalog for the EBI package.
@@ -58,7 +59,8 @@ var ErrorCatalog = customerror.
 	MustSet(ErrIndexNameRequired, "index name").
 	MustSet(ErrInvalidBulkOptions, "bulk options").
 	MustSet(ErrInvalidMetrics, "metrics").
-	MustSet(ErrInvalidOperation, "operation")
+	MustSet(ErrInvalidOperation, "operation").
+	MustSet(ErrSampleDocRequired, "sample document")
 
 //////
 // Exported functionalities.

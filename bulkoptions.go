@@ -281,6 +281,18 @@ func WithDocAsUpsert[T any](docAsUpsert bool) BulkOptionsFunc[T] {
 
 // NewBulkOptions calculates the bulk indexing options based on the
 // sample document size and cluster configuration.
+//
+// sampleDoc MUST be a non-empty JSON document — its byte length is used
+// later in BulkCreate to compute the recommended batch size
+// (`targetBatchSizeBytes / docSize` in ebi.go). Passing a zero-length
+// sampleDoc would surface as `runtime error: integer divide by zero`
+// inside BulkCreate, far from the construction site, with no error
+// return path. Fail fast here with a clear, named error instead.
+//
+// The struct's `validate:"required"` tag on SampleDoc does NOT catch this
+// case: an empty (but non-nil) `json.RawMessage([]byte{})` satisfies the
+// `required` validator because it's a non-nil slice. This explicit length
+// check is the only safety net against the panic.
 func NewBulkOptions[T any](
 	// Index name.
 	indexName string,
@@ -290,6 +302,14 @@ func NewBulkOptions[T any](
 
 	options ...BulkOptionsFunc[T],
 ) (*BulkOptions[T], error) {
+	//////
+	// Required-input validation (fail fast — see doc comment).
+	//////
+
+	if len(sampleDoc) == 0 {
+		return nil, ErrorCatalog.MustGet(ErrSampleDocRequired).NewRequiredError()
+	}
+
 	//////
 	// Apply options.
 	//////

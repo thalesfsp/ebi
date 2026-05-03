@@ -361,10 +361,31 @@ func (ebi *EBI[T]) BulkCreate(
 
 	defer metricsTicker.Stop()
 
+	// metricsCtx is an INTERNAL context that fires Done() exactly when
+	// BulkCreate returns (via the deferred metricsCancel below). This
+	// guarantees the metrics goroutine exits cleanly even when the
+	// caller's `ctx` never fires Done() — for example when the caller
+	// passes context.Background() or a context.WithoutCancel-derived
+	// context (proj-ringboost-vendor cleanupCtx).
+	//
+	// Without this, the goroutine watches only the caller's ctx; once
+	// BulkCreate's deferred ticker.Stop() runs, the goroutine is parked
+	// in `select { case <-ctx.Done(): ...; case <-ticker.C: ... }` —
+	// ticker.C does NOT close on Stop(), it just stops sending — so
+	// the goroutine waits forever on a channel that will never deliver.
+	// Each BulkCreate call leaks one such goroutine.
+	//
+	// 2026-05-01 production repro: rotation-stuck watchdog captured 3+
+	// orphaned BulkCreate.func3 goroutines (98–609 minutes old, from
+	// rotations 9–10 hours earlier). Regression test:
+	// TestBulkCreate_NoMetricsGoroutineLeak_AfterReturn.
+	metricsCtx, metricsCancel := context.WithCancel(ctx)
+	defer metricsCancel()
+
 	go func() {
 		for {
 			select {
-			case <-ctx.Done():
+			case <-metricsCtx.Done():
 				return
 			case <-metricsTicker.C:
 				defer func() {

@@ -56,7 +56,20 @@ func calculateSystemPressure(
 	// - JVM heap usage
 	// - Circuit breaker status
 	// - Indexing pressure memory
+	//
+	// NOTE: Elasticsearch omits whole stats sections depending on node
+	// role, version and the requested metric filter, so every pointer here
+	// can legitimately be nil and every limit can legitimately be 0. Each
+	// factor is guarded individually: a partially-populated node
+	// contributes only the factors it has (the totalFactors accumulators
+	// normalize accordingly), and zero limits are skipped because dividing
+	// by them poisons every pressure number with +Inf/NaN.
 	for _, node := range nodeStats.Nodes {
+		// A null node entry decodes into a nil pointer.
+		if node == nil {
+			continue
+		}
+
 		//////
 		// Data nodes and total RAM.
 		//////
@@ -64,7 +77,11 @@ func calculateSystemPressure(
 		if strings.Contains(strings.Join(node.Roles, ","), "data") {
 			dataNodes++
 
-			totalRAMGB += node.JVM.Mem.HeapMaxInBytes / 1024 / 1024 / 1024
+			// RAM is derived from the JVM heap; a node reporting no JVM
+			// section still counts as a data node, it just contributes 0.
+			if node.JVM != nil && node.JVM.Mem != nil {
+				totalRAMGB += node.JVM.Mem.HeapMaxInBytes / 1024 / 1024 / 1024
+			}
 		}
 
 		if node.JVM != nil && node.JVM.Mem != nil {
@@ -73,7 +90,8 @@ func calculateSystemPressure(
 			totalMemoryFactors += 40
 		}
 
-		if node.Breakers != nil && node.Breakers.Parent != nil {
+		if node.Breakers != nil && node.Breakers.Parent != nil &&
+			node.Breakers.Parent.LimitSizeInBytes > 0 {
 			// Circuit breaker contributes 30% of the memory pressure.
 			breakerPressure := float64(node.Breakers.Parent.EstimatedSizeInBytes) /
 				float64(node.Breakers.Parent.LimitSizeInBytes) * 100
@@ -82,8 +100,9 @@ func calculateSystemPressure(
 		}
 
 		// Indexing pressure memory contributes 30% of the memory pressure.
-		if pressure := node.IndexingPressure.Memory; pressure != nil {
-			if pressure.LimitInBytes > 0 {
+		if node.IndexingPressure != nil && node.IndexingPressure.Memory != nil {
+			if pressure := node.IndexingPressure.Memory; pressure.Current != nil &&
+				pressure.LimitInBytes > 0 {
 				currentPressure := float64(pressure.Current.AllInBytes) /
 					float64(pressure.LimitInBytes) * 100
 				memoryPressurePoints += currentPressure * 0.3
@@ -97,17 +116,20 @@ func calculateSystemPressure(
 		// - Merge pressure
 		if node.Indices != nil {
 			// Write load contributes 50% of the write pressure.
-			if writeLoad := node.Indices.Indexing.WriteLoad; writeLoad > 0 {
+			if node.Indices.Indexing != nil && node.Indices.Indexing.WriteLoad > 0 {
 				// Normalize the write load (assume that >1 is 100% pressure).
-				writePressure := math.Min(writeLoad*100, 100)
+				writePressure := math.Min(node.Indices.Indexing.WriteLoad*100, 100)
 
 				writePressurePoints += writePressure * 0.5
 
 				totalWriteFactors += 50
 			}
 
-			// Merge status contributes 30% of the write pressure.
-			if merges := node.Indices.Merges; merges != nil && merges.TotalTimeInMillis > 0 {
+			// Merge status contributes 30% of the write pressure. It needs
+			// the JVM uptime as the denominator, so the factor is skipped
+			// when the JVM section is missing or uptime is 0.
+			if merges := node.Indices.Merges; merges != nil && merges.TotalTimeInMillis > 0 &&
+				node.JVM != nil && node.JVM.UptimeInMillis > 0 {
 				// If spending more than 10% of the time in merges, consider pressure.
 				mergePressure := math.Min(
 					float64(merges.TotalTimeInMillis)/
@@ -120,7 +142,7 @@ func calculateSystemPressure(
 			}
 
 			// Throttle status contributes 20% of the write pressure.
-			if node.Indices.Indexing.IsThrottled {
+			if node.Indices.Indexing != nil && node.Indices.Indexing.IsThrottled {
 				writePressurePoints += 100 * 0.2
 
 				totalWriteFactors += 20
@@ -149,10 +171,11 @@ func calculateSystemPressure(
 	metrics.UpdateOverallPressure(overallPressure)
 
 	// Calculate average RAM per node.
+	//
+	// NOTE: Written through the locked setter — this runs on the metrics
+	// goroutine while GetMetrics/getNodeInfo readers run elsewhere.
 	if dataNodes > 0 {
-		metrics.numDataNodes = int(dataNodes)
-
-		metrics.ramPerNodeGB = int(totalRAMGB / dataNodes)
+		metrics.updateNodeInfo(int(dataNodes), int(totalRAMGB/dataNodes))
 	}
 }
 
@@ -177,8 +200,9 @@ func updateIndexMetrics[T any](
 	// Calculate, and update system pressure metrics.
 	calculateSystemPressure(metrics, *ns)
 
-	// Nodes stats.
-	metrics.NodeStats = ns
+	// Nodes stats. Written through the locked setter — GetMetrics readers
+	// run on other goroutines.
+	metrics.UpdateNodeStats(ns)
 
 	return nil
 }
@@ -186,20 +210,6 @@ func updateIndexMetrics[T any](
 //////
 // Bulk options process.
 //////
-
-// RoundToNearestThousandDivisibleBy2 rounds up to the nearest thousand and
-// then to the nearest even number divisible by 2.
-func roundToNearestThousandDivisibleBy2(n int) int {
-	// Round up to nearest thousand.
-	thousand := ((n + 999) / 1000) * 1000
-
-	// If not divisible by 2000, round up to next 2000.
-	if thousand%2000 != 0 {
-		thousand = ((thousand + 1999) / 2000) * 2000
-	}
-
-	return thousand
-}
 
 // Process `v`:
 // - Set default values using the `default` field tag.

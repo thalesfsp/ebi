@@ -36,7 +36,11 @@ type NumWorkersFunc func() (int, error)
 // NumWorkersByJVM calculates the number of workers based on the JVM heap size.
 func NumWorkersByJVM(metrics *Metrics) NumWorkersFunc {
 	return func() (int, error) {
-		jvmHeapSizeGB := float64(metrics.ramPerNodeGB) / 2
+		// Read through the locked getter — the metrics goroutine updates
+		// the node topology concurrently.
+		_, ramPerNodeGB := metrics.getNodeInfo()
+
+		jvmHeapSizeGB := float64(ramPerNodeGB) / 2
 
 		workersPerNode := int(jvmHeapSizeGB / 1)
 
@@ -84,17 +88,32 @@ type BulkOptions[T any] struct {
 	// Metrics related.
 	MetricsCheck time.Duration `default:"5s" json:"metricsCheck" validate:"required"`
 
+	// MetricsCh receives point-in-time snapshots of the metrics.
+	//
+	// NOTE: Delivery is best-effort: when the channel is full — or nobody
+	// is reading — snapshots are DROPPED rather than blocking the indexing
+	// workers. Buffer the channel to reduce drops. Do not close it while a
+	// bulk operation may still be running.
 	MetricsCh chan<- *Metrics
 
 	// Async error handling.
+	//
+	// NOTE: Unlike MetricsCh, error delivery blocks until the reader
+	// receives it (or the operation's context ends) — keep reading until
+	// BulkCreate returns, and do not close the channel while a bulk
+	// operation may still be running.
 	ErrorCh chan<- error
 
 	// Internals related.
-	FlushBytes     int           `json:"flushBytes" validate:"omitempty,gt=0"`
-	FlushInterval  time.Duration `default:"30s"     json:"flushInterval"      validate:"omitempty,gt=0"`
-	Index          string        `json:"index"      validate:"required"`
-	RefreshPolicy  RefreshPolicy `default:"false"   json:"refreshPolicy"      validate:"omitempty,oneof=false immediate wait_for"`
-	RetryOnFailure int           `default:"3"       json:"retryOnFailure"     validate:"omitempty,gte=0"`
+	FlushBytes    int           `json:"flushBytes" validate:"omitempty,gt=0"`
+	FlushInterval time.Duration `default:"30s"     json:"flushInterval"      validate:"omitempty,gt=0"`
+	Index         string        `json:"index"      validate:"required"`
+	RefreshPolicy RefreshPolicy `default:"false" json:"refreshPolicy" validate:"omitempty,oneof=false immediate wait_for"`
+
+	// RetryOnFailure is reserved: it is currently NOT wired into the
+	// underlying esutil.BulkIndexer (which has no per-item retry knob —
+	// retries are a client/transport concern).
+	RetryOnFailure int `default:"3" json:"retryOnFailure" validate:"omitempty,gte=0"`
 
 	//////
 	// Dynamic options, they are optional.
@@ -118,11 +137,17 @@ type BulkOptions[T any] struct {
 	Operation string `default:"index" json:"operation" validate:"omitempty"`
 
 	// DocAsUpsert determines whether to use upsert behavior for update
-	// operations. Default to `true` - if the document doesn't exist, it will be
-	// created.
+	// operations. NewBulkOptions defaults it to `true` - if the document
+	// doesn't exist, it will be created. Struct-literal construction gets
+	// the Go zero value (false).
 	//
 	// NOTE: It only applies to `update` "Operation".
-	DocAsUpsert bool `default:"true" json:"docAsUpsert"`
+	DocAsUpsert bool `json:"docAsUpsert"`
+
+	// docAsUpsertSet records whether WithDocAsUpsert was used: without it,
+	// NewBulkOptions cannot tell an explicit `false` apart from "not set"
+	// and would clobber it with the default `true`.
+	docAsUpsertSet bool
 
 	// RoutingFunc determines in the evaluation time the routing value.
 	RoutingFunc func(doct T) string `json:"-"`
@@ -272,6 +297,7 @@ func WithOperation[T any](operation string) BulkOptionsFunc[T] {
 func WithDocAsUpsert[T any](docAsUpsert bool) BulkOptionsFunc[T] {
 	return func(o *BulkOptions[T]) {
 		o.DocAsUpsert = docAsUpsert
+		o.docAsUpsertSet = true
 	}
 }
 
@@ -321,11 +347,22 @@ func NewBulkOptions[T any](
 		option(&opts)
 	}
 
+	// DocAsUpsert defaults to true, but an explicit WithDocAsUpsert wins —
+	// including WithDocAsUpsert(false), which a `default` tag would clobber
+	// back to true (zero value == "unset" for the tag processor).
+	docAsUpsert := true
+	if opts.docAsUpsertSet {
+		docAsUpsert = opts.DocAsUpsert
+	}
+
 	bO := &BulkOptions[T]{
 		Index:     indexName,
 		SampleDoc: sampleDoc,
 
 		Operation: opts.Operation,
+
+		DocAsUpsert:    docAsUpsert,
+		docAsUpsertSet: true,
 
 		RefreshPolicy: opts.RefreshPolicy,
 

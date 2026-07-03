@@ -10,7 +10,7 @@ import (
 	"github.com/elastic/go-elasticsearch/v8"
 	"github.com/elastic/go-elasticsearch/v8/esapi"
 	"github.com/elastic/go-elasticsearch/v8/esutil"
-	"github.com/thalesfsp/customerror"
+	"github.com/thalesfsp/customerror/v2"
 	"github.com/thalesfsp/ho"
 	"github.com/thalesfsp/sypl"
 	"github.com/thalesfsp/sypl/level"

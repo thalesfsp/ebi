@@ -5,7 +5,7 @@ import (
 	"encoding/json"
 	"time"
 
-	"github.com/thalesfsp/customerror"
+	"github.com/thalesfsp/customerror/v2"
 )
 
 //////

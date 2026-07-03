@@ -105,6 +105,7 @@ func fakeESServer(t *testing.T) *httptest.Server {
 	}))
 
 	t.Cleanup(srv.Close)
+
 	return srv
 }
 
@@ -122,6 +123,7 @@ func newTestEBI(t *testing.T, srv *httptest.Server) *EBI[*TestModel] {
 	)
 	require.NoError(t, err)
 	require.NotNil(t, ebi)
+
 	return ebi
 }
 

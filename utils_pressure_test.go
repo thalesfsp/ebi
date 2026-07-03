@@ -59,7 +59,6 @@ func fullStatsNode() *NodeDetails {
 	}
 }
 
-//nolint:maintidx
 func TestCalculateSystemPressure_Table(t *testing.T) {
 	t.Parallel()
 

@@ -171,6 +171,7 @@ func newCaptureES(t *testing.T, cfg captureESConfig) *captureES {
 				if cfg.pingStatus != 0 {
 					w.WriteHeader(cfg.pingStatus)
 				}
+
 				return
 			}
 			_, _ = w.Write([]byte(`{
@@ -185,6 +186,7 @@ func newCaptureES(t *testing.T, cfg captureESConfig) *captureES {
 			if cfg.nodesStatsStatus != 0 {
 				w.WriteHeader(cfg.nodesStatsStatus)
 				_, _ = w.Write([]byte(cfg.nodesStatsBody))
+
 				return
 			}
 			_, _ = w.Write([]byte(`{
@@ -196,6 +198,7 @@ func newCaptureES(t *testing.T, cfg captureESConfig) *captureES {
 			body, err := io.ReadAll(r.Body)
 			if err != nil {
 				w.WriteHeader(http.StatusBadRequest)
+
 				return
 			}
 
@@ -203,6 +206,7 @@ func newCaptureES(t *testing.T, cfg captureESConfig) *captureES {
 			if actions == nil {
 				w.WriteHeader(http.StatusBadRequest)
 				_, _ = w.Write([]byte(`{"error":"malformed NDJSON"}`))
+
 				return
 			}
 
@@ -226,6 +230,7 @@ func newCaptureES(t *testing.T, cfg captureESConfig) *captureES {
 							"reason": "forced item failure",
 						},
 					}})
+
 					continue
 				}
 
@@ -245,6 +250,7 @@ func newCaptureES(t *testing.T, cfg captureESConfig) *captureES {
 			if cfg.refreshStatus != 0 {
 				w.WriteHeader(cfg.refreshStatus)
 				_, _ = w.Write([]byte(`{"error":{"type":"forced","reason":"forced refresh failure"},"status":500}`))
+
 				return
 			}
 			_, _ = w.Write([]byte(`{"_shards":{"total":1,"successful":1,"failed":0}}`))
@@ -280,6 +286,7 @@ func runBulkCreateGuarded(
 		return err
 	case <-time.After(auditTimeout):
 		t.Fatal("deadlock: BulkCreate did not return within the audit timeout")
+
 		return nil
 	}
 }
@@ -931,6 +938,7 @@ func TestBulkCreate_FlushCallbacksWired(t *testing.T) {
 		WithDocumentIDFunc(func(d *TestModel) string { return d.ID }),
 		WithFlushStartFunc[*TestModel](func(ctx context.Context) context.Context {
 			starts.Add(1)
+
 			return ctx
 		}),
 		WithFlushEndFunc[*TestModel](func(context.Context) {

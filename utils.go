@@ -13,6 +13,94 @@ import (
 // Update metrics process.
 //////
 
+// nodeMemoryPressureFactors returns the memory-pressure points contributed
+// by a single node and the factor weight they were computed against: JVM
+// heap usage (40), parent circuit breaker (30), and indexing pressure
+// memory (30).
+//
+// NOTE: Elasticsearch omits whole stats sections depending on node role,
+// version and the requested metric filter, so every pointer here can
+// legitimately be nil and every limit can legitimately be 0. Each factor is
+// guarded individually: a partially-populated node contributes only the
+// factors it has (the caller's totalFactors accumulator normalizes
+// accordingly), and zero limits are skipped because dividing by them
+// poisons every pressure number with +Inf/NaN.
+func nodeMemoryPressureFactors(node *NodeDetails) (float64, float64) {
+	var points, factors float64
+
+	if node.JVM != nil && node.JVM.Mem != nil {
+		// JVM heap contributes 40% of the memory pressure.
+		points += float64(node.JVM.Mem.HeapUsedPercent) * 0.4
+		factors += 40
+	}
+
+	if node.Breakers != nil && node.Breakers.Parent != nil &&
+		node.Breakers.Parent.LimitSizeInBytes > 0 {
+		// Circuit breaker contributes 30% of the memory pressure.
+		breakerPressure := float64(node.Breakers.Parent.EstimatedSizeInBytes) /
+			float64(node.Breakers.Parent.LimitSizeInBytes) * 100
+		points += breakerPressure * 0.3
+		factors += 30
+	}
+
+	// Indexing pressure memory contributes 30% of the memory pressure.
+	if node.IndexingPressure != nil && node.IndexingPressure.Memory != nil {
+		if pressure := node.IndexingPressure.Memory; pressure.Current != nil &&
+			pressure.LimitInBytes > 0 {
+			currentPressure := float64(pressure.Current.AllInBytes) /
+				float64(pressure.LimitInBytes) * 100
+			points += currentPressure * 0.3
+			factors += 30
+		}
+	}
+
+	return points, factors
+}
+
+// nodeWritePressureFactors returns the write-pressure points contributed by
+// a single node and the factor weight they were computed against: write
+// load (50), merge time (30), and throttling (20). Same partial-population
+// contract as nodeMemoryPressureFactors.
+func nodeWritePressureFactors(node *NodeDetails) (float64, float64) {
+	if node.Indices == nil {
+		return 0, 0
+	}
+
+	var points, factors float64
+
+	if node.Indices.Indexing != nil && node.Indices.Indexing.WriteLoad > 0 {
+		// Write load contributes 50% of the write pressure. Normalize the
+		// write load (assume that >1 is 100% pressure).
+		writePressure := math.Min(node.Indices.Indexing.WriteLoad*100, 100)
+
+		points += writePressure * 0.5
+		factors += 50
+	}
+
+	// Merge status contributes 30% of the write pressure. It needs the JVM
+	// uptime as the denominator, so the factor is skipped when the JVM
+	// section is missing or uptime is 0 (div by zero -> +Inf).
+	if merges := node.Indices.Merges; merges != nil && merges.TotalTimeInMillis > 0 &&
+		node.JVM != nil && node.JVM.UptimeInMillis > 0 {
+		// If spending more than 10% of the time in merges, consider pressure.
+		mergePressure := math.Min(
+			float64(merges.TotalTimeInMillis)/
+				float64(node.JVM.UptimeInMillis)*1000, 100,
+		)
+
+		points += mergePressure * 0.3
+		factors += 30
+	}
+
+	// Throttle status contributes 20% of the write pressure.
+	if node.Indices.Indexing != nil && node.Indices.Indexing.IsThrottled {
+		points += 100 * 0.2
+		factors += 20
+	}
+
+	return points, factors
+}
+
 // calculateSystemPressure calculates the system pressure based on the provided
 // node stats. This implementation creates three main metrics:
 //
@@ -52,18 +140,9 @@ func calculateSystemPressure(
 		totalRAMGB int64
 	)
 
-	// Calculated memory pressure based on:
-	// - JVM heap usage
-	// - Circuit breaker status
-	// - Indexing pressure memory
-	//
-	// NOTE: Elasticsearch omits whole stats sections depending on node
-	// role, version and the requested metric filter, so every pointer here
-	// can legitimately be nil and every limit can legitimately be 0. Each
-	// factor is guarded individually: a partially-populated node
-	// contributes only the factors it has (the totalFactors accumulators
-	// normalize accordingly), and zero limits are skipped because dividing
-	// by them poisons every pressure number with +Inf/NaN.
+	// Accumulate each node's memory and write pressure factors (see the
+	// nodeMemoryPressureFactors/nodeWritePressureFactors contracts for how
+	// partially-populated nodes are handled).
 	for _, node := range nodeStats.Nodes {
 		// A null node entry decodes into a nil pointer.
 		if node == nil {
@@ -84,70 +163,13 @@ func calculateSystemPressure(
 			}
 		}
 
-		if node.JVM != nil && node.JVM.Mem != nil {
-			// JVM heap contributes 40% of the memory pressure.
-			memoryPressurePoints += float64(node.JVM.Mem.HeapUsedPercent) * 0.4
-			totalMemoryFactors += 40
-		}
+		memoryPoints, memoryFactors := nodeMemoryPressureFactors(node)
+		memoryPressurePoints += memoryPoints
+		totalMemoryFactors += memoryFactors
 
-		if node.Breakers != nil && node.Breakers.Parent != nil &&
-			node.Breakers.Parent.LimitSizeInBytes > 0 {
-			// Circuit breaker contributes 30% of the memory pressure.
-			breakerPressure := float64(node.Breakers.Parent.EstimatedSizeInBytes) /
-				float64(node.Breakers.Parent.LimitSizeInBytes) * 100
-			memoryPressurePoints += breakerPressure * 0.3
-			totalMemoryFactors += 30
-		}
-
-		// Indexing pressure memory contributes 30% of the memory pressure.
-		if node.IndexingPressure != nil && node.IndexingPressure.Memory != nil {
-			if pressure := node.IndexingPressure.Memory; pressure.Current != nil &&
-				pressure.LimitInBytes > 0 {
-				currentPressure := float64(pressure.Current.AllInBytes) /
-					float64(pressure.LimitInBytes) * 100
-				memoryPressurePoints += currentPressure * 0.3
-				totalMemoryFactors += 30
-			}
-		}
-
-		// Calculate write pressure based on:
-		// - Write load
-		// - Throttle status
-		// - Merge pressure
-		if node.Indices != nil {
-			// Write load contributes 50% of the write pressure.
-			if node.Indices.Indexing != nil && node.Indices.Indexing.WriteLoad > 0 {
-				// Normalize the write load (assume that >1 is 100% pressure).
-				writePressure := math.Min(node.Indices.Indexing.WriteLoad*100, 100)
-
-				writePressurePoints += writePressure * 0.5
-
-				totalWriteFactors += 50
-			}
-
-			// Merge status contributes 30% of the write pressure. It needs
-			// the JVM uptime as the denominator, so the factor is skipped
-			// when the JVM section is missing or uptime is 0.
-			if merges := node.Indices.Merges; merges != nil && merges.TotalTimeInMillis > 0 &&
-				node.JVM != nil && node.JVM.UptimeInMillis > 0 {
-				// If spending more than 10% of the time in merges, consider pressure.
-				mergePressure := math.Min(
-					float64(merges.TotalTimeInMillis)/
-						float64(node.JVM.UptimeInMillis)*1000, 100,
-				)
-
-				writePressurePoints += mergePressure * 0.3
-
-				totalWriteFactors += 30
-			}
-
-			// Throttle status contributes 20% of the write pressure.
-			if node.Indices.Indexing != nil && node.Indices.Indexing.IsThrottled {
-				writePressurePoints += 100 * 0.2
-
-				totalWriteFactors += 20
-			}
-		}
+		writePoints, writeFactors := nodeWritePressureFactors(node)
+		writePressurePoints += writePoints
+		totalWriteFactors += writeFactors
 	}
 
 	// Normalize the memory pressure.

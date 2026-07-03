@@ -75,8 +75,6 @@ func NumWorkersAutoDiscovery[T any](ctx context.Context, ebi *EBI[T]) NumWorkers
 // BulkOptions defines the options for bulk indexing.
 //
 // NOTE: Use NewBulkOptions() to create a new BulkOptions struct!
-//
-//nolint:lll
 type BulkOptions[T any] struct {
 	// These are options that can be used in the hyperparameter tuning.
 	BatchSize  int            `json:"batchSize"`
@@ -108,6 +106,9 @@ type BulkOptions[T any] struct {
 	FlushBytes    int           `json:"flushBytes" validate:"omitempty,gt=0"`
 	FlushInterval time.Duration `default:"30s"     json:"flushInterval"      validate:"omitempty,gt=0"`
 	Index         string        `json:"index"      validate:"required"`
+
+	// RefreshPolicy controls the refresh query parameter sent on each bulk
+	// request ("immediate" maps to refresh=true).
 	RefreshPolicy RefreshPolicy `default:"false" json:"refreshPolicy" validate:"omitempty,oneof=false immediate wait_for"`
 
 	// RetryOnFailure is reserved: it is currently NOT wired into the

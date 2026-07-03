@@ -1,49 +1,135 @@
-run:
-  timeout: 1m
+version: "2"
 
+# This mirrors the pre-v2 lint policy — golangci-lint v1.61.0 with
+# `enable-all: true` + `fast: true` (the fast, AST-only subset). The upgrade to
+# golangci-lint v2 (required because customerror/v2 raises the module to
+# Go 1.25, which v1.61.0 cannot load) changes only the config format and the
+# tool version, not what is enforced.
+#
+# The block below is the faithful `golangci-lint migrate` output with one edit:
+# the linters that are NEW in golangci-lint v2 — cyclop, funcorder, goconst,
+# modernize, noinlineerr, wsl_v5 — are added to `disable` so nothing new starts
+# gating. None of them were enforcing under v1 (BulkCreate, for one, is
+# //nolint'd for the v1 complexity linters but never needed a cyclop suppression,
+# and the prior CI was green on this exact tree). The original `wsl` — which v1
+# DID use, with the relaxations and exclusions below — stays enabled. Adopting
+# the new v2 linters is a separate decision from this dependency bump.
 linters:
-  enable-all: true
+  default: all
   disable:
+    - asasalint
+    - bodyclose
+    - canonicalheader
+    - containedctx
+    - contextcheck
     - depguard
-    - paralleltest
-    - testifylint
-    - funlen
+    - durationcheck
+    - err113
+    - errcheck
+    - errchkjson
+    - errname
+    - errorlint
+    - exhaustive
     - exhaustruct
-    - tagliatelle
-    - ireturn
-    - testpackage
-    - godox
-    - gomnd
-    - mnd
+    - exptostd
+    - fatcontext
+    - forbidigo
+    - forcetypeassert
+    - funlen
+    - ginkgolinter
+    - gochecknoglobals
     - gochecknoinits
-  fast: true
-
-
-# Settings for specific linters
-linters-settings:
-  revive:
-    ignore-generated-header: true
+    - gochecksumtype
+    - gocritic
+    - godox
+    - gosec
+    - gosmopolitan
+    - govet
+    - iface
+    - importas
+    - intrange
+    - ireturn
+    - loggercheck
+    - makezero
+    - mirror
+    - mnd
+    - musttag
+    - nilerr
+    - nilnesserr
+    - nilnil
+    - noctx
+    - nonamedreturns
+    - paralleltest
+    - perfsprint
+    - protogetter
+    - reassign
+    - recvcheck
+    - revive
+    - rowserrcheck
+    - sloglint
+    - spancheck
+    - sqlclosecheck
+    - staticcheck
+    - tagliatelle
+    - testifylint
+    - testpackage
+    - thelper
+    - tparallel
+    - unconvert
+    - unparam
+    - unused
+    - usetesting
+    - varnamelen
+    - wastedassign
+    - wrapcheck
+    - zerologlint
+    # New in golangci-lint v2 — kept off to match the v1 fast-lint baseline.
+    - cyclop
+    - funcorder
+    - goconst
+    - modernize
+    - noinlineerr
+    - wsl_v5
+  settings:
+    funlen:
+      lines: 250
+      statements: 45
+    revive:
+      rules:
+        - name: unused-parameter
+          disabled: true
+    wsl:
+      allow-trailing-comment: true
+      allow-separated-leading-comment: true
+  exclusions:
+    generated: lax
+    presets:
+      - comments
+      - common-false-positives
+      - legacy
+      - std-error-handling
     rules:
-      - name: "unused-parameter"
-        disabled: true
-
-  funlen:
-    lines: 250
-    statements: 45
-
-  wsl:
-    allow-separated-leading-comment: true
-    allow-trailing-comment: true
-
-
-issues:
-  exclude-rules:
-    - linters:
-        - wsl
-      text: "block should not start with a whitespace"
-      
-    - path: _test\.go
-      linters:
-        - containedctx
-        - wsl
-        - lll
+      - linters:
+          - wsl
+        text: block should not start with a whitespace
+      - linters:
+          - containedctx
+          - lll
+          - wsl
+        path: _test\.go
+    paths:
+      - third_party$
+      - builtin$
+      - examples$
+formatters:
+  enable:
+    - gci
+    - gofmt
+    - gofumpt
+    - goimports
+  exclusions:
+    generated: lax
+    paths:
+      - third_party$
+      - builtin$
+      - examples$

@@ -6,7 +6,7 @@ import (
 	"strings"
 
 	"github.com/thalesfsp/configurer/util"
-	"github.com/thalesfsp/customerror"
+	"github.com/thalesfsp/customerror/v2"
 )
 
 //////

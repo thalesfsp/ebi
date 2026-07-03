@@ -1,7 +1,7 @@
 package ebi
 
 import (
-	"github.com/thalesfsp/customerror"
+	"github.com/thalesfsp/customerror/v2"
 	"github.com/thalesfsp/ebi/internal/shared"
 )
 

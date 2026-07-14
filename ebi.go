@@ -12,8 +12,8 @@ import (
 	"github.com/elastic/go-elasticsearch/v8/esutil"
 	"github.com/thalesfsp/customerror/v2"
 	"github.com/thalesfsp/ho"
-	"github.com/thalesfsp/sypl"
-	"github.com/thalesfsp/sypl/level"
+	"github.com/thalesfsp/sypl/v2"
+	"github.com/thalesfsp/sypl/v2/level"
 )
 
 //////

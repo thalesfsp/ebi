@@ -82,6 +82,28 @@ func (ebi *EBI[T]) refreshIndex(ctx context.Context, indexName string) error {
 			NewFailedToError(customerror.WithField("response", res.String()))
 	}
 
+	// Elasticsearch can return HTTP 200 while one or more shard refreshes
+	// failed, so the shard result must be checked independently of the status.
+	var refreshResponse struct {
+		Shards ShardStats `json:"_shards"`
+	}
+
+	if err := json.NewDecoder(res.Body).Decode(&refreshResponse); err != nil {
+		return ErrorCatalog.
+			MustGet(ErrFailedToRefreshIndex).
+			NewFailedToError(customerror.WithError(err))
+	}
+
+	if refreshResponse.Shards.Failed != 0 {
+		return ErrorCatalog.
+			MustGet(ErrFailedToRefreshIndex).
+			NewFailedToError(
+				customerror.WithField("total", refreshResponse.Shards.Total),
+				customerror.WithField("successful", refreshResponse.Shards.Successful),
+				customerror.WithField("failed", refreshResponse.Shards.Failed),
+			)
+	}
+
 	return nil
 }
 
@@ -149,8 +171,13 @@ func (ebi *EBI[T]) discoverWorkerNodes(ctx context.Context) (int, error) {
 			continue
 		}
 
-		if strings.Contains(strings.Join(node.Roles, ","), "data") {
-			dataNodes++
+		for _, role := range node.Roles {
+			// Data roles include compound names such as data_hot and data_content.
+			if strings.Contains(role, "data") {
+				dataNodes++
+
+				break
+			}
 		}
 	}
 
@@ -766,9 +793,10 @@ func (ebi *EBI[T]) BulkCreate(
 	return nil
 }
 
-// HyperparameterOptimization runs a hyperparameter optimization
-// using the Gaussian Process and Upper Confidence Bound (UCB)
-// as acquisition function against batch size and number of workers.
+// HyperparameterOptimization runs a hyperparameter optimization using the
+// Gaussian Process and Upper Confidence Bound (UCB) as acquisition function.
+// It requires exactly two ranges, ordered as batch size then number of workers,
+// returns an error if no trial succeeds, and does not modify the caller's options.
 //
 // NOTE: Regarding BulkOptions, use NewBulkOptions to create a new instance.
 func (ebi *EBI[T]) HyperparameterOptimization(
@@ -787,11 +815,53 @@ func (ebi *EBI[T]) HyperparameterOptimization(
 	// Parameter range to be optimized.
 	parameterRange []ho.ParameterRange[int],
 ) ([]int, error) {
+	//////
+	// Validation.
+	//////
+
+	if opts == nil {
+		return nil, ErrorCatalog.
+			MustGet(ErrHyperparameterOptimization).
+			NewInvalidError(customerror.WithField("options", "must not be nil"))
+	}
+
+	// The benchmark maps params[0] and params[1] to batch size and worker count,
+	// so any other number of ranges cannot describe a usable trial.
+	if len(parameterRange) != 2 {
+		return nil, ErrorCatalog.
+			MustGet(ErrHyperparameterOptimization).
+			NewInvalidError(customerror.WithField("parameterRanges", len(parameterRange)))
+	}
+
+	for i, parameterRange := range parameterRange {
+		// Non-positive or inverted ranges would make the generated bulk options
+		// invalid or cause ho's inclusive random-range calculation to panic.
+		if parameterRange.Min <= 0 || parameterRange.Min > parameterRange.Max {
+			return nil, ErrorCatalog.
+				MustGet(ErrHyperparameterOptimization).
+				NewInvalidError(
+					customerror.WithField("parameterRange", i),
+					customerror.WithField("min", parameterRange.Min),
+					customerror.WithField("max", parameterRange.Max),
+				)
+		}
+	}
+
+	// Trials need private mutable settings while the caller's reusable options
+	// remain observably unchanged.
+	optsCopy := *opts
+
+	// ho invokes benchmarkFunc sequentially in its sampling and optimization
+	// loops, so these trial results do not require synchronization.
+	successfulTrials := 0
+
+	var lastFailure error
+
 	// Benchmark function that tests different parameter combinations.
 	benchmarkFunc := func(params ...int) error {
 		// Parameters to be optimized.
-		opts.BatchSize = params[0]
-		opts.NumWorkers = NumWorkersManual(params[1])
+		optsCopy.BatchSize = params[0]
+		optsCopy.NumWorkers = NumWorkersManual(params[1])
 
 		// We don't care about metrics, just the error, if any
 		// must be returned so the Gaussian Process can learn
@@ -799,12 +869,14 @@ func (ebi *EBI[T]) HyperparameterOptimization(
 		if err := ebi.BulkCreate(
 			ctx,
 			docs,
-			opts,
+			&optsCopy,
 		); err != nil {
-			return ErrorCatalog.
-				MustGet(ErrHyperparameterOptimization).
-				NewFailedToError(customerror.WithError(err))
+			lastFailure = err
+
+			return err
 		}
+
+		successfulTrials++
 
 		return nil
 	}
@@ -815,6 +887,14 @@ func (ebi *EBI[T]) HyperparameterOptimization(
 		benchmarkFunc,
 		parameterRange...,
 	)
+
+	// ho converts benchmark errors into timing penalties and returns no error,
+	// so an all-failed run must be surfaced explicitly to the caller.
+	if successfulTrials == 0 {
+		return optimalSize, ErrorCatalog.
+			MustGet(ErrHyperparameterOptimization).
+			NewFailedToError(customerror.WithError(lastFailure))
+	}
 
 	return optimalSize, nil
 }

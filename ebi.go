@@ -890,10 +890,22 @@ func (ebi *EBI[T]) HyperparameterOptimization(
 
 	// ho converts benchmark errors into timing penalties and returns no error,
 	// so an all-failed run must be surfaced explicitly to the caller.
+	//
+	// lastFailure is nil when ho never ran a trial at all — an optimization
+	// config with no initial samples and no iterations. There is still no
+	// usable result to report, so that case errors too, just without a cause.
 	if successfulTrials == 0 {
+		errorOpts := []customerror.Option{
+			customerror.WithField("successfulTrials", successfulTrials),
+		}
+
+		if lastFailure != nil {
+			errorOpts = append(errorOpts, customerror.WithError(lastFailure))
+		}
+
 		return optimalSize, ErrorCatalog.
 			MustGet(ErrHyperparameterOptimization).
-			NewFailedToError(customerror.WithError(lastFailure))
+			NewFailedToError(errorOpts...)
 	}
 
 	return optimalSize, nil

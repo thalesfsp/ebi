@@ -187,19 +187,8 @@ func (gm *Metrics) UpdateNodeStats(ns *NodesStats) {
 	gm.NodeStats = ns
 }
 
-// updateNodeInfo updates the node topology snapshot. It runs on the metrics
-// goroutine while GetMetrics readers run on other goroutines, so these
-// fields must never be written without the lock.
-func (gm *Metrics) updateNodeInfo(numDataNodes, ramPerNodeGB int) {
-	gm.mu.Lock()
-	defer gm.mu.Unlock()
-
-	gm.numDataNodes = numDataNodes
-	gm.ramPerNodeGB = ramPerNodeGB
-}
-
 // getNodeInfo returns the node topology snapshot (numDataNodes,
-// ramPerNodeGB). Locked counterpart of updateNodeInfo.
+// ramPerNodeGB). Locked counterpart of updateComputed.
 func (gm *Metrics) getNodeInfo() (int, int) {
 	gm.mu.Lock()
 	defer gm.mu.Unlock()

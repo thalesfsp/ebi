@@ -60,9 +60,9 @@ The integrated Hyperparameter Optimization (HO) uses Bayesian optimization with 
 - **Flexible Configuration System**: 
   - **Core Parameters**:
     - Automatically calculated batch size and worker count
-    - Configurable flush intervals and buffer sizes
+    - Configurable flush intervals and buffer sizes (`BatchSize` drives the flush size whenever `FlushBytes` isn't set)
     - Multiple refresh policies (immediate, wait_for, false)
-    - Intelligent retry mechanisms
+    - `RetryOnFailure` is reserved for future use — it is validated but not currently wired into indexing behavior
   - **Dynamic Functions**:
     - Custom document ID generation (`DocumentIDFunc`)
     - Dynamic index name modification (`IndexNameFunc`)
@@ -119,11 +119,25 @@ ML-driven optimization for finding optimal bulk indexing parameters:
 - Returns optimal parameters `[batchSize, numWorkers]`
 - Minimizes indexing errors while maximizing throughput
 
+## Requirements
+
+- Go **1.25** or later (raised in v0.3.0 by the `customerror/v2` dependency).
+
 ## Install
 
 ```bash
 go get github.com/thalesfsp/ebi
 ```
+
+## Upgrading to v0.4.0
+
+If you're upgrading from an older release, check these before you deploy:
+
+- **Go 1.25+ is required** (raised in v0.3.0 by the `customerror/v2` dependency). Builds on older toolchains will fail.
+- **`BulkCreate` now returns an error in cases that used to return `nil`**: documents that fail to marshal, flush-level failures (e.g. an HTTP 200 with an undecodable body), and responses that acknowledge fewer documents than were sent are all now surfaced. This is the headline benefit of the upgrade — silent data loss that previously returned success is now visible as an error.
+- **`BatchSize` now drives flush cadence when `FlushBytes` is unset** (it was inert before v0.2.0). If you already set `BatchSize` and never set `FlushBytes`, your flush cadence may change on upgrade. Set `WithFlushBytes(...)` explicitly to pin the previous ~5MB-target behavior.
+- **Error messages carry an `ERR_...: ` code prefix** (from `customerror/v2`, v0.3.0+). Replace any exact/full-string error matching with substring or error-code checks.
+- See the [v0.2.0](https://github.com/thalesfsp/ebi/releases/tag/v0.2.0), [v0.3.0](https://github.com/thalesfsp/ebi/releases/tag/v0.3.0), and [v0.4.0](https://github.com/thalesfsp/ebi/releases/tag/v0.4.0) release notes for the full list of behavior changes.
 
 ## Quick Start
 
@@ -192,6 +206,12 @@ Monitor indexing progress and cluster health through structured metrics channels
 
 Set up monitoring channels for real-time metrics and error reporting, configure options with appropriate channel buffer sizes, and implement monitoring goroutines to track progress, status, throughput, and cluster health. The monitoring system provides comprehensive insights into document processing rates, error counts, memory pressure, and overall system performance.
 
+> **Channel contract — read before wiring up `MetricsCh` and `ErrorCh`:**
+> - Both channels are delivered **best-effort and non-blocking**. If a send can't complete immediately (buffer full or nobody reading), the snapshot or error is **dropped** — never queued, and never allowed to block an indexing worker. Buffer both channels generously if you need reliable delivery.
+> - `MetricsCh` snapshots are point-in-time; the final snapshot sent before `BulkCreate` returns reports status `done`.
+> - `ErrorCh` is detail, not your only failure signal: a failed operation is **always** reported through `BulkCreate`'s own returned error, even if the matching `ErrorCh` send was dropped.
+> - **Never close `MetricsCh` or `ErrorCh`**, including after `BulkCreate` returns. When the caller's context is cancelled, the underlying bulk indexer does not wait for its workers to fully join, so a callback can fire briefly after `BulkCreate` returns — sending on a channel you've already closed panics the process. Just stop reading from it; there's nothing to clean up.
+
 ### Custom Monitoring Functions
 
 #### Pause Function
@@ -206,7 +226,7 @@ Control when to refresh the index based on specific conditions such as transacti
 
 The `BulkOptions` struct provides extensive configuration capabilities for customizing bulk indexing behavior:
 
-**Core Configuration**: Set target index name, operation type (index/create/update/delete), batch size, worker count, flush thresholds, and sample documents for optimization calculations.
+**Core Configuration**: Set target index name, operation type (index/create/update/delete), batch size, worker count, flush thresholds, and sample documents for optimization calculations. When `FlushBytes` isn't set explicitly, `BatchSize` (multiplied by the sample document's size) determines the flush cadence; leave both unset to fall back to the ~5MB-target auto-calculation. `RetryOnFailure` is accepted and validated but currently reserved — it has no effect on indexing behavior yet.
 
 **Update Operation Options**: Enable upsert behavior for update operations, allowing documents to be created if they don't exist.
 
@@ -234,6 +254,8 @@ Control how and when Elasticsearch refreshes the index with three main policies:
 
 EBI provides comprehensive error handling with detailed error reporting and graceful degradation capabilities.
 
+> Error messages are built on `customerror/v2` and carry an `ERR_...: ` code prefix. Match on the error code or a substring, not the full message text, since the human-readable portion can change between releases.
+
 ### Error Categories
 
 - **Configuration Errors**: Invalid bulk options, missing required fields
@@ -244,7 +266,7 @@ EBI provides comprehensive error handling with detailed error reporting and grac
 
 ### Async Error Handling
 
-Errors are reported asynchronously via channels, allowing non-blocking operation. Set up error channels to receive detailed error information and implement error handling logic based on error types. The system supports differentiated handling for document indexing failures, bulk indexer errors, and general operational errors.
+Errors are reported asynchronously via `ErrorCh`, allowing non-blocking operation. Delivery is **best-effort**: an error that can't be handed off immediately (channel full, or unbuffered with no reader ready) is **dropped**, not queued. Buffer `ErrorCh` generously if you want to observe every error, and never close it (see the channel contract above) — `BulkCreate`'s returned error is always the authoritative signal that an operation failed, independent of what arrives on `ErrorCh`.
 
 ### Graceful Degradation
 
@@ -253,7 +275,7 @@ EBI continues processing healthy documents even when some fail:
 - Individual document failures don't stop the entire batch
 - Detailed error reporting for each failed document
 - Metrics tracking of success/failure rates
-- Automatic retry mechanisms for transient failures
+- Silent data loss is surfaced, not swallowed: marshal failures, flush-level failures, and under-acknowledged responses all now return an error from `BulkCreate` instead of a false `nil`
 
 ### Error Recovery
 
@@ -303,7 +325,7 @@ Always monitor cluster metrics to prevent overload by implementing pause functio
 
 ### 3. Handle Errors Gracefully
 
-Implement proper error handling for production use by setting up error channels with adequate buffer sizes. Monitor error rates and implement alerting mechanisms for high error conditions to ensure operational awareness.
+Implement proper error handling for production use by setting up error channels with adequate buffer sizes — remember that `ErrorCh` delivery is best-effort and can drop errors under load, so always check `BulkCreate`'s returned error too. Monitor error rates and implement alerting mechanisms for high error conditions to ensure operational awareness.
 
 ### 4. Use Appropriate Refresh Policies
 

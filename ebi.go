@@ -196,6 +196,17 @@ func bestEffortMetricsSend(ch chan<- *Metrics, m *Metrics) {
 		return
 	}
 
+	// A send case's value is evaluated before select picks a branch, so a full
+	// buffer would still pay for a snapshot it immediately discards. Checking
+	// capacity first keeps the drop path allocation-free.
+	//
+	// The cap check is load-bearing: an unbuffered channel reports len == cap == 0
+	// and must still reach the select, which delivers only if a receiver is
+	// already waiting.
+	if cap(ch) > 0 && len(ch) == cap(ch) {
+		return
+	}
+
 	select {
 	case ch <- m.GetMetrics():
 	default:
@@ -272,7 +283,7 @@ func (ebi *EBI[T]) BulkCreate(
 	if opts == nil {
 		return ErrorCatalog.
 			MustGet(ErrInvalidBulkOptions).
-			NewRequiredError()
+			NewInvalidError()
 	}
 
 	// Process a private shallow copy: process() applies `default` tags by
@@ -404,6 +415,14 @@ func (ebi *EBI[T]) BulkCreate(
 			NewFailedToError(customerror.WithError(err))
 	}
 
+	// esutil maps zero to runtime.NumCPU(), but a negative value reaches its
+	// queue allocation unchanged and would panic instead of returning an error.
+	if ns < 0 {
+		return ErrorCatalog.
+			MustGet(ErrFailedToRetrieveNumWorkers).
+			NewFailedToError(customerror.WithField("numWorkers", ns))
+	}
+
 	//////
 	// Internal helpers.
 	//////
@@ -493,7 +512,7 @@ func (ebi *EBI[T]) BulkCreate(
 			asyncErrorHandler(
 				ErrorCatalog.
 					MustGet(ErrIndexerError).
-					NewFailedToError(
+					New(
 						customerror.WithError(err),
 						customerror.WithTag("esutil.NewBulkIndexer.OnError"),
 					),
@@ -623,6 +642,49 @@ func (ebi *EBI[T]) BulkCreate(
 
 	marshalFailedDocs := 0
 
+	// The item callbacks depend only on call-wide state, so one shared pair
+	// serves every item without allocating document-specific closures.
+	onSuccess := func(_ context.Context, _ esutil.BulkIndexerItem, _ esutil.BulkIndexerResponseItem) {
+		// Update metrics.
+		metrics.IncreaseDocsSucceeded()
+
+		// This callback runs on an esutil worker goroutine — it
+		// must never block on a slow/absent metrics reader.
+		bestEffortMetricsSend(opts.MetricsCh, metrics)
+	}
+
+	onFailure := func(_ context.Context, bII esutil.BulkIndexerItem, res esutil.BulkIndexerResponseItem, err error) {
+		errorOpts := []customerror.Option{
+			customerror.WithField("res.Error", res.Error),
+			customerror.WithField("bII.DocumentID", bII.DocumentID),
+			customerror.WithField("res.DocID", res.DocumentID),
+			customerror.WithTag("bi.Add"),
+		}
+
+		if err != nil {
+			errorOpts = append(errorOpts, customerror.WithError(err))
+			errorOpts = append(errorOpts, customerror.WithField("error", err.Error()))
+		}
+
+		// Send this async error to the error channel.
+		asyncErrorHandler(
+			ErrorCatalog.
+				MustGet(ErrFailedToIndexDocument).
+				NewFailedToError(
+					errorOpts...,
+				),
+		)
+
+		// Update metrics.
+		metrics.IncreaseDocsFailed()
+
+		metrics.IncrementErrorCount()
+
+		// This callback runs on an esutil worker goroutine — it
+		// must never block on a slow/absent metrics reader.
+		bestEffortMetricsSend(opts.MetricsCh, metrics)
+	}
+
 	// Bulk insertion.
 	//
 	// NOTE: This is a parallel, asynchronous, efficient indexing process.
@@ -634,10 +696,20 @@ func (ebi *EBI[T]) BulkCreate(
 				NewFailedToError(customerror.WithError(err))
 		}
 
-		// Thread-safe check if the bulk indexer should be paused. If status is
-		// "paused", then it pauses.
-		if metrics.GetMetrics().Status == StatusPaused {
-			time.Sleep(opts.PauseDuration)
+		// Only the metrics ticker can pause the indexer, so callers without a
+		// pause function avoid even the narrow locked status read.
+		if opts.PauseFunc != nil && metrics.getStatus() == StatusPaused {
+			pauseTimer := time.NewTimer(opts.PauseDuration)
+
+			select {
+			case <-pauseTimer.C:
+			case <-ctx.Done():
+				pauseTimer.Stop()
+
+				return ErrorCatalog.
+					MustGet(ErrContextCancelled).
+					NewFailedToError(customerror.WithError(ctx.Err()))
+			}
 		}
 
 		// Properly marshal the document to JSON according to the operation type.
@@ -651,18 +723,12 @@ func (ebi *EBI[T]) BulkCreate(
 			// For index and create operations, we can use the document directly.
 			data, opErr = json.Marshal(doc)
 		case Update:
-			// For update operations, wrap the document in a "doc" field.
-			updateBody := map[string]any{
-				"doc": doc,
-			}
-
-			// Sets doc_as_upsert behavior only if enabled.
-			// For true partial updates, omit doc_as_upsert entirely when false.
-			if opts.DocAsUpsert {
-				updateBody["doc_as_upsert"] = true
-			}
-
-			data, opErr = json.Marshal(updateBody)
+			// A typed envelope preserves the stable key order and omission
+			// semantics without allocating and sorting a map for every update.
+			data, opErr = json.Marshal(struct {
+				Doc         T    `json:"doc"`
+				DocAsUpsert bool `json:"doc_as_upsert,omitempty"`
+			}{Doc: doc, DocAsUpsert: opts.DocAsUpsert})
 		case Delete:
 			// For delete operations, no body is needed.
 			data = nil
@@ -700,50 +766,12 @@ func (ebi *EBI[T]) BulkCreate(
 
 		bII := esutil.BulkIndexerItem{
 			Action: opts.Operation, // e.g.: "index", "update", "delete", etc.
-			Index:  indexName,
 
 			// Document successfully indexed.
-			OnSuccess: func(_ context.Context, _ esutil.BulkIndexerItem, _ esutil.BulkIndexerResponseItem) {
-				// Update metrics.
-				metrics.IncreaseDocsSucceeded()
-
-				// This callback runs on an esutil worker goroutine — it
-				// must never block on a slow/absent metrics reader.
-				bestEffortMetricsSend(opts.MetricsCh, metrics)
-			},
+			OnSuccess: onSuccess,
 
 			// Document failed to index.
-			OnFailure: func(_ context.Context, bII esutil.BulkIndexerItem, res esutil.BulkIndexerResponseItem, err error) {
-				errorOpts := []customerror.Option{
-					customerror.WithField("res.Error", res.Error),
-					customerror.WithField("bII.DocumentID", bII.DocumentID),
-					customerror.WithField("res.DocID", res.DocumentID),
-					customerror.WithTag("bi.Add"),
-				}
-
-				if err != nil {
-					errorOpts = append(errorOpts, customerror.WithError(err))
-					errorOpts = append(errorOpts, customerror.WithField("error", err.Error()))
-				}
-
-				// Send this async error to the error channel.
-				asyncErrorHandler(
-					ErrorCatalog.
-						MustGet(ErrFailedToIndexDocument).
-						NewFailedToError(
-							errorOpts...,
-						),
-				)
-
-				// Update metrics.
-				metrics.IncreaseDocsFailed()
-
-				metrics.IncrementErrorCount()
-
-				// This callback runs on an esutil worker goroutine — it
-				// must never block on a slow/absent metrics reader.
-				bestEffortMetricsSend(opts.MetricsCh, metrics)
-			},
+			OnFailure: onFailure,
 		}
 
 		// Should allow to specify document ID. If the document ID is not set,
@@ -771,7 +799,17 @@ func (ebi *EBI[T]) BulkCreate(
 		}
 
 		// Actually add the document to the bulk indexer.
-		if err := bi.Add(ctx, bII); err != nil {
+		addErr := bi.Add(ctx, bII)
+
+		// Add may enqueue successfully when cancellation and the queue send are
+		// both ready, so the context must be rechecked regardless of its result.
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return ErrorCatalog.
+				MustGet(ErrContextCancelled).
+				NewFailedToError(customerror.WithError(ctxErr))
+		}
+
+		if addErr != nil {
 			// A cancellation racing the Add surfaces here as esutil's
 			// wrapped ctx error; report it uniformly as the cancellation
 			// it is, matching the top-of-loop check.
@@ -784,18 +822,14 @@ func (ebi *EBI[T]) BulkCreate(
 			return ErrorCatalog.
 				MustGet(ErrFailedToAddDocumentToBulkIndexer).
 				NewFailedToError(
-					customerror.WithError(err),
+					customerror.WithError(addErr),
 					customerror.WithTag("bi.Add"),
 				)
 		}
 
-		// Update metrics.
-		metrics.IncreaseDocsProcessed()
-
-		// Update bytes processed only if we have data
-		if data != nil {
-			metrics.UpdateBytesProcessed(int64(len(data)))
-		}
+		// The document count and its body bytes are one progress event, so they
+		// are published under a single metrics lock.
+		metrics.AddProcessed(int64(len(data)))
 
 		// Per-document metrics delivery. Best-effort and inline —
 		// deferring these sends would accumulate one per document and
@@ -885,7 +919,9 @@ func (ebi *EBI[T]) BulkCreate(
 
 	ebi.logger.Debuglnf("Stats: %+v", stats)
 
-	// Ensures metrics channel is updated - one last time (best-effort).
+	// Consumers use the final snapshot to distinguish completed work from an
+	// operation that stopped early, so publish the terminal state before send.
+	metrics.UpdateStatus(StatusDone)
 	bestEffortMetricsSend(opts.MetricsCh, metrics)
 
 	return nil

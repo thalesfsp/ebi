@@ -801,12 +801,12 @@ func TestBulkCreate_OptsNotMutated_IndexNameFuncNotCompounded(t *testing.T) {
 	assert.Equal(t, "base", opts.Index,
 		"BulkCreate must not write the derived index name back into opts (B10)")
 
-	actions := f.allActions()
-	require.NotEmpty(t, actions)
+	requests := f.bulkRequests()
+	require.NotEmpty(t, requests)
 
-	for i, a := range actions {
-		assert.Equal(t, "base-suffix", a.Index,
-			"action %d: index name must be derived fresh per call, never compounded (B10)", i)
+	for i, r := range requests {
+		assert.Equal(t, "/base-suffix/_bulk", r.Path,
+			"bulk request %d: index name must be derived fresh per call, never compounded (B10)", i)
 	}
 }
 

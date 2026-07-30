@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/elastic/go-elasticsearch/v8"
@@ -82,6 +84,28 @@ func (ebi *EBI[T]) refreshIndex(ctx context.Context, indexName string) error {
 			NewFailedToError(customerror.WithField("response", res.String()))
 	}
 
+	// Elasticsearch can return HTTP 200 while one or more shard refreshes
+	// failed, so the shard result must be checked independently of the status.
+	var refreshResponse struct {
+		Shards ShardStats `json:"_shards"`
+	}
+
+	if err := json.NewDecoder(res.Body).Decode(&refreshResponse); err != nil {
+		return ErrorCatalog.
+			MustGet(ErrFailedToRefreshIndex).
+			NewFailedToError(customerror.WithError(err))
+	}
+
+	if refreshResponse.Shards.Failed != 0 {
+		return ErrorCatalog.
+			MustGet(ErrFailedToRefreshIndex).
+			NewFailedToError(
+				customerror.WithField("total", refreshResponse.Shards.Total),
+				customerror.WithField("successful", refreshResponse.Shards.Successful),
+				customerror.WithField("failed", refreshResponse.Shards.Failed),
+			)
+	}
+
 	return nil
 }
 
@@ -149,8 +173,13 @@ func (ebi *EBI[T]) discoverWorkerNodes(ctx context.Context) (int, error) {
 			continue
 		}
 
-		if strings.Contains(strings.Join(node.Roles, ","), "data") {
-			dataNodes++
+		for _, role := range node.Roles {
+			// Data roles include compound names such as data_hot and data_content.
+			if strings.Contains(role, "data") {
+				dataNodes++
+
+				break
+			}
 		}
 	}
 
@@ -167,20 +196,30 @@ func bestEffortMetricsSend(ch chan<- *Metrics, m *Metrics) {
 		return
 	}
 
+	// A send case's value is evaluated before select picks a branch, so a full
+	// buffer would still pay for a snapshot it immediately discards. Checking
+	// capacity first keeps the drop path allocation-free.
+	//
+	// The cap check is load-bearing: an unbuffered channel reports len == cap == 0
+	// and must still reach the select, which delivers only if a receiver is
+	// already waiting.
+	if cap(ch) > 0 && len(ch) == cap(ch) {
+		return
+	}
+
 	select {
 	case ch <- m.GetMetrics():
 	default:
 	}
 }
 
-// asyncErrorSend sends err to errorCh without blocking if ctx is cancelled
-// or errorCh is nil. Returns true if the error was delivered, false if
-// ctx cancelled first or errorCh was nil.
+// asyncErrorSend attempts to send err to errorCh without blocking. It returns
+// true when the channel accepts the error immediately and false when the
+// channel is nil, full, or unread.
 //
-// This is the deadlock-safe counterpart to a bare `errorCh <- err` send:
-// callers can signal an error asynchronously without risking a hang when
-// the reader goroutine has already exited (e.g. on context cancellation).
-func asyncErrorSend(ctx context.Context, errorCh chan<- error, err error) bool {
+// Delivery is best-effort at all times: an error that cannot be delivered
+// immediately is dropped.
+func asyncErrorSend(errorCh chan<- error, err error) bool {
 	if errorCh == nil {
 		return false
 	}
@@ -188,7 +227,7 @@ func asyncErrorSend(ctx context.Context, errorCh chan<- error, err error) bool {
 	select {
 	case errorCh <- err:
 		return true
-	case <-ctx.Done():
+	default:
 		return false
 	}
 }
@@ -233,7 +272,7 @@ func (ebi *EBI[T]) BulkCreate(
 	if opts == nil {
 		return ErrorCatalog.
 			MustGet(ErrInvalidBulkOptions).
-			NewRequiredError()
+			NewInvalidError()
 	}
 
 	// Process a private shallow copy: process() applies `default` tags by
@@ -365,16 +404,24 @@ func (ebi *EBI[T]) BulkCreate(
 			NewFailedToError(customerror.WithError(err))
 	}
 
+	// esutil maps zero to runtime.NumCPU(), but a negative value reaches its
+	// queue allocation unchanged and would panic instead of returning an error.
+	if ns < 0 {
+		return ErrorCatalog.
+			MustGet(ErrFailedToRetrieveNumWorkers).
+			NewFailedToError(customerror.WithField("numWorkers", ns))
+	}
+
 	//////
 	// Internal helpers.
 	//////
 
-	// metricsCtx is an INTERNAL context that fires Done() exactly when
-	// BulkCreate returns (via the deferred metricsCancel below). This
-	// guarantees the metrics goroutine exits cleanly even when the
-	// caller's `ctx` never fires Done() — for example when the caller
-	// passes context.Background() or a context.WithoutCancel-derived
-	// context (proj-ringboost-vendor cleanupCtx).
+	// metricsCtx is an INTERNAL context that fires Done() when BulkCreate
+	// begins cleanup. This guarantees the metrics goroutine exits cleanly
+	// even when the caller's `ctx` never fires Done() — for example when
+	// the caller passes context.Background() or a
+	// context.WithoutCancel-derived context (proj-ringboost-vendor
+	// cleanupCtx).
 	//
 	// Without this, the goroutine watches only the caller's ctx; once
 	// BulkCreate's deferred ticker.Stop() runs, the goroutine is parked
@@ -390,16 +437,12 @@ func (ebi *EBI[T]) BulkCreate(
 	metricsCtx, metricsCancel := context.WithCancel(ctx)
 	defer metricsCancel()
 
-	// Helper function to send async errors.
-	//
-	// Delegates to asyncErrorSend so the error send is ctx-aware — if the
-	// reader goroutine has already exited (e.g. on context cancellation)
-	// we won't deadlock on an unbuffered ErrorCh. Bound to metricsCtx, NOT
-	// the caller's ctx: with a Background-like caller ctx and a dead
-	// ErrorCh reader, a send guarded only by the caller's ctx would park
-	// its goroutine forever even after BulkCreate returned.
+	metricsDone := make(chan struct{})
+
+	// Helper function to send async errors without blocking document production
+	// or an esutil worker when ErrorCh is full or unread.
 	asyncErrorHandler := func(err error) {
-		_ = asyncErrorSend(metricsCtx, opts.ErrorCh, err)
+		_ = asyncErrorSend(opts.ErrorCh, err)
 	}
 
 	//////
@@ -413,6 +456,14 @@ func (ebi *EBI[T]) BulkCreate(
 		refresh = "true"
 	}
 
+	// esutil invokes OnError concurrently from its worker goroutines and may
+	// invoke it more than once for the same flush failure. Retaining only the
+	// first error preserves the original cause without racing or overwriting it.
+	var (
+		indexerErrorMu sync.Mutex
+		indexerError   error
+	)
+
 	// Configure Bulk Indexer (BI).
 	bi, err := esutil.NewBulkIndexer(esutil.BulkIndexerConfig{
 		Client:        ebi.client,
@@ -424,6 +475,21 @@ func (ebi *EBI[T]) BulkCreate(
 		OnFlushStart:  opts.FlushStartFunc,
 		OnFlushEnd:    opts.FlushEndFunc,
 		OnError: func(_ context.Context, err error) {
+			// Cancellation is already returned through BulkCreate's context
+			// paths, so treating it or a late transport symptom from an
+			// interrupted request as an indexer failure would report it twice.
+			if ctx.Err() != nil ||
+				errors.Is(err, context.Canceled) ||
+				errors.Is(err, context.DeadlineExceeded) {
+				return
+			}
+
+			indexerErrorMu.Lock()
+			if indexerError == nil {
+				indexerError = err
+			}
+			indexerErrorMu.Unlock()
+
 			// Update metrics.
 			metrics.IncrementErrorCount()
 
@@ -431,7 +497,7 @@ func (ebi *EBI[T]) BulkCreate(
 			asyncErrorHandler(
 				ErrorCatalog.
 					MustGet(ErrIndexerError).
-					NewFailedToError(
+					New(
 						customerror.WithError(err),
 						customerror.WithTag("esutil.NewBulkIndexer.OnError"),
 					),
@@ -469,11 +535,10 @@ func (ebi *EBI[T]) BulkCreate(
 	}
 
 	defer func() {
-		// Cancelling the metrics context BEFORE closing is load-bearing
-		// on error paths: Close blocks until the workers flush, and the
-		// worker callbacks' error sends are guarded by metricsCtx — with
-		// it cancelled they can never hang this return.
+		// Stop and join our metrics goroutine before asking esutil to close.
+		// Error delivery never blocks worker callbacks.
 		metricsCancel()
+		<-metricsDone
 
 		// Best-effort close: the main path already closed and consumed
 		// the error; here an error is already being returned.
@@ -484,13 +549,15 @@ func (ebi *EBI[T]) BulkCreate(
 	// Metrics monitoring goroutine.
 	//////
 
-	// Start metrics monitoring goroutine. It exits via metricsCtx (see
-	// its comment above) when BulkCreate returns.
+	// Start metrics monitoring goroutine. It exits via metricsCtx before
+	// BulkCreate finishes cleanup.
 	metricsTicker := time.NewTicker(opts.MetricsCheck)
 
 	defer metricsTicker.Stop()
 
 	go func() {
+		defer close(metricsDone)
+
 		for {
 			select {
 			case <-metricsCtx.Done():
@@ -557,6 +624,58 @@ func (ebi *EBI[T]) BulkCreate(
 		}
 	}()
 
+	marshalFailedDocs := 0
+
+	// The item callbacks depend only on call-wide state, so one shared pair
+	// serves every item without allocating document-specific closures.
+	onSuccess := func(_ context.Context, _ esutil.BulkIndexerItem, _ esutil.BulkIndexerResponseItem) {
+		// Update metrics.
+		metrics.IncreaseDocsSucceeded()
+
+		// This callback runs on an esutil worker goroutine — it
+		// must never block on a slow/absent metrics reader.
+		bestEffortMetricsSend(opts.MetricsCh, metrics)
+	}
+
+	onFailure := func(_ context.Context, bII esutil.BulkIndexerItem, res esutil.BulkIndexerResponseItem, err error) {
+		// A cancelled Close can leave esutil's worker briefly alive. Ignore its
+		// late per-item transport symptom because BulkCreate already returned
+		// the caller's cancellation.
+		if ctx.Err() != nil {
+			return
+		}
+
+		errorOpts := []customerror.Option{
+			customerror.WithField("res.Error", res.Error),
+			customerror.WithField("bII.DocumentID", bII.DocumentID),
+			customerror.WithField("res.DocID", res.DocumentID),
+			customerror.WithTag("bi.Add"),
+		}
+
+		if err != nil {
+			errorOpts = append(errorOpts, customerror.WithError(err))
+			errorOpts = append(errorOpts, customerror.WithField("error", err.Error()))
+		}
+
+		// Send this async error to the error channel.
+		asyncErrorHandler(
+			ErrorCatalog.
+				MustGet(ErrFailedToIndexDocument).
+				NewFailedToError(
+					errorOpts...,
+				),
+		)
+
+		// Update metrics.
+		metrics.IncreaseDocsFailed()
+
+		metrics.IncrementErrorCount()
+
+		// This callback runs on an esutil worker goroutine — it
+		// must never block on a slow/absent metrics reader.
+		bestEffortMetricsSend(opts.MetricsCh, metrics)
+	}
+
 	// Bulk insertion.
 	//
 	// NOTE: This is a parallel, asynchronous, efficient indexing process.
@@ -568,10 +687,20 @@ func (ebi *EBI[T]) BulkCreate(
 				NewFailedToError(customerror.WithError(err))
 		}
 
-		// Thread-safe check if the bulk indexer should be paused. If status is
-		// "paused", then it pauses.
-		if metrics.GetMetrics().Status == StatusPaused {
-			time.Sleep(opts.PauseDuration)
+		// Only the metrics ticker can pause the indexer, so callers without a
+		// pause function avoid even the narrow locked status read.
+		if opts.PauseFunc != nil && metrics.getStatus() == StatusPaused {
+			pauseTimer := time.NewTimer(opts.PauseDuration)
+
+			select {
+			case <-pauseTimer.C:
+			case <-ctx.Done():
+				pauseTimer.Stop()
+
+				return ErrorCatalog.
+					MustGet(ErrContextCancelled).
+					NewFailedToError(customerror.WithError(ctx.Err()))
+			}
 		}
 
 		// Properly marshal the document to JSON according to the operation type.
@@ -585,18 +714,12 @@ func (ebi *EBI[T]) BulkCreate(
 			// For index and create operations, we can use the document directly.
 			data, opErr = json.Marshal(doc)
 		case Update:
-			// For update operations, wrap the document in a "doc" field.
-			updateBody := map[string]any{
-				"doc": doc,
-			}
-
-			// Sets doc_as_upsert behavior only if enabled.
-			// For true partial updates, omit doc_as_upsert entirely when false.
-			if opts.DocAsUpsert {
-				updateBody["doc_as_upsert"] = true
-			}
-
-			data, opErr = json.Marshal(updateBody)
+			// A typed envelope preserves the stable key order and omission
+			// semantics without allocating and sorting a map for every update.
+			data, opErr = json.Marshal(struct {
+				Doc         T    `json:"doc"`
+				DocAsUpsert bool `json:"doc_as_upsert,omitempty"`
+			}{Doc: doc, DocAsUpsert: opts.DocAsUpsert})
 		case Delete:
 			// For delete operations, no body is needed.
 			data = nil
@@ -611,7 +734,12 @@ func (ebi *EBI[T]) BulkCreate(
 
 		if opErr != nil {
 			// Update metrics.
+			metrics.IncreaseDocsFailed()
 			metrics.IncrementErrorCount()
+
+			// Counted separately: these documents never reach esutil, so its
+			// failed-document stat cannot account for them.
+			marshalFailedDocs++
 
 			// Send this async error to the error channel.
 			asyncErrorHandler(
@@ -629,50 +757,12 @@ func (ebi *EBI[T]) BulkCreate(
 
 		bII := esutil.BulkIndexerItem{
 			Action: opts.Operation, // e.g.: "index", "update", "delete", etc.
-			Index:  indexName,
 
 			// Document successfully indexed.
-			OnSuccess: func(_ context.Context, _ esutil.BulkIndexerItem, _ esutil.BulkIndexerResponseItem) {
-				// Update metrics.
-				metrics.IncreaseDocsSucceeded()
-
-				// This callback runs on an esutil worker goroutine — it
-				// must never block on a slow/absent metrics reader.
-				bestEffortMetricsSend(opts.MetricsCh, metrics)
-			},
+			OnSuccess: onSuccess,
 
 			// Document failed to index.
-			OnFailure: func(_ context.Context, bII esutil.BulkIndexerItem, res esutil.BulkIndexerResponseItem, err error) {
-				errorOpts := []customerror.Option{
-					customerror.WithField("res.Error", res.Error),
-					customerror.WithField("bII.DocumentID", bII.DocumentID),
-					customerror.WithField("res.DocID", res.DocumentID),
-					customerror.WithTag("bi.Add"),
-				}
-
-				if err != nil {
-					errorOpts = append(errorOpts, customerror.WithError(err))
-					errorOpts = append(errorOpts, customerror.WithField("error", err.Error()))
-				}
-
-				// Send this async error to the error channel.
-				asyncErrorHandler(
-					ErrorCatalog.
-						MustGet(ErrFailedToIndexDocument).
-						NewFailedToError(
-							errorOpts...,
-						),
-				)
-
-				// Update metrics.
-				metrics.IncreaseDocsFailed()
-
-				metrics.IncrementErrorCount()
-
-				// This callback runs on an esutil worker goroutine — it
-				// must never block on a slow/absent metrics reader.
-				bestEffortMetricsSend(opts.MetricsCh, metrics)
-			},
+			OnFailure: onFailure,
 		}
 
 		// Should allow to specify document ID. If the document ID is not set,
@@ -700,7 +790,17 @@ func (ebi *EBI[T]) BulkCreate(
 		}
 
 		// Actually add the document to the bulk indexer.
-		if err := bi.Add(ctx, bII); err != nil {
+		addErr := bi.Add(ctx, bII)
+
+		// Add may enqueue successfully when cancellation and the queue send are
+		// both ready, so the context must be rechecked regardless of its result.
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return ErrorCatalog.
+				MustGet(ErrContextCancelled).
+				NewFailedToError(customerror.WithError(ctxErr))
+		}
+
+		if addErr != nil {
 			// A cancellation racing the Add surfaces here as esutil's
 			// wrapped ctx error; report it uniformly as the cancellation
 			// it is, matching the top-of-loop check.
@@ -713,18 +813,14 @@ func (ebi *EBI[T]) BulkCreate(
 			return ErrorCatalog.
 				MustGet(ErrFailedToAddDocumentToBulkIndexer).
 				NewFailedToError(
-					customerror.WithError(err),
+					customerror.WithError(addErr),
 					customerror.WithTag("bi.Add"),
 				)
 		}
 
-		// Update metrics.
-		metrics.IncreaseDocsProcessed()
-
-		// Update bytes processed only if we have data
-		if data != nil {
-			metrics.UpdateBytesProcessed(int64(len(data)))
-		}
+		// The document count and its body bytes are one progress event, so they
+		// are published under a single metrics lock.
+		metrics.AddProcessed(int64(len(data)))
 
 		// Per-document metrics delivery. Best-effort and inline —
 		// deferring these sends would accumulate one per document and
@@ -732,10 +828,15 @@ func (ebi *EBI[T]) BulkCreate(
 		bestEffortMetricsSend(opts.MetricsCh, metrics)
 	}
 
-	// Flush the remaining buffered documents BEFORE reading the stats:
-	// with the default FlushBytes and a small doc set the ONLY flush
-	// happens inside Close — reading Stats() first would miss every
-	// failure from that final flush and report success.
+	// Stop and join our metrics goroutine before asking esutil to close. When
+	// ctx is cancelled esutil may return from Close without joining its workers,
+	// whose callbacks therefore use only non-blocking channel sends.
+	metricsCancel()
+	<-metricsDone
+
+	// Flush the remaining buffered documents BEFORE reading the stats: with
+	// the default FlushBytes and a small doc set the only flush happens inside
+	// Close, so reading Stats first would miss failures from the final flush.
 	if err := closeBI(); err != nil {
 		return ErrorCatalog.
 			MustGet(ErrFailedToBulkIndexDocuments).
@@ -748,27 +849,79 @@ func (ebi *EBI[T]) BulkCreate(
 	// Final statistics.
 	stats := bi.Stats()
 
-	// Check if any document failed to index.
-	if stats.NumFailed > 0 {
+	indexerErrorMu.Lock()
+	firstIndexerError := indexerError
+	indexerErrorMu.Unlock()
+
+	// Marshal failures never enter esutil, so its failed count cannot account
+	// for them. Reporting both counters together preserves the full batch loss.
+	if stats.NumFailed > 0 || marshalFailedDocs > 0 {
+		errorOpts := make([]customerror.Option, 0, 5)
+
+		if stats.NumFailed > 0 {
+			errorOpts = append(
+				errorOpts,
+				customerror.WithField("failedDocs", stats.NumFailed),
+				customerror.WithTag("bulkCreate"),
+			)
+		}
+
+		if marshalFailedDocs > 0 {
+			errorOpts = append(
+				errorOpts,
+				customerror.WithField("marshalFailedDocs", marshalFailedDocs),
+				customerror.WithTag("json.Marshal"),
+			)
+		}
+
+		if firstIndexerError != nil {
+			errorOpts = append(errorOpts, customerror.WithError(firstIndexerError))
+		}
+
+		return ErrorCatalog.
+			MustGet(ErrFailedToBulkIndexDocuments).
+			NewFailedToError(errorOpts...)
+	}
+
+	// Flush-wide failures such as an undecodable success response never reach
+	// per-item callbacks, so esutil's failed-document count remains zero.
+	if firstIndexerError != nil {
 		return ErrorCatalog.
 			MustGet(ErrFailedToBulkIndexDocuments).
 			NewFailedToError(
-				customerror.WithField("failedDocs", stats.NumFailed),
+				customerror.WithError(firstIndexerError),
+				customerror.WithTag("esutil.NewBulkIndexer.OnError"),
+			)
+	}
+
+	// Every added item must receive exactly one per-item acknowledgement.
+	// A shorter response can otherwise look successful because esutil only
+	// counts the items present in the response body.
+	if stats.NumAdded != stats.NumFlushed+stats.NumFailed {
+		return ErrorCatalog.
+			MustGet(ErrFailedToBulkIndexDocuments).
+			NewFailedToError(
+				customerror.WithField("numAdded", stats.NumAdded),
+				customerror.WithField("numFlushed", stats.NumFlushed),
+				customerror.WithField("numFailed", stats.NumFailed),
 				customerror.WithTag("bulkCreate"),
 			)
 	}
 
 	ebi.logger.Debuglnf("Stats: %+v", stats)
 
-	// Ensures metrics channel is updated - one last time (best-effort).
+	// Consumers use the final snapshot to distinguish completed work from an
+	// operation that stopped early, so publish the terminal state before send.
+	metrics.UpdateStatus(StatusDone)
 	bestEffortMetricsSend(opts.MetricsCh, metrics)
 
 	return nil
 }
 
-// HyperparameterOptimization runs a hyperparameter optimization
-// using the Gaussian Process and Upper Confidence Bound (UCB)
-// as acquisition function against batch size and number of workers.
+// HyperparameterOptimization runs a hyperparameter optimization using the
+// Gaussian Process and Upper Confidence Bound (UCB) as acquisition function.
+// It requires exactly two ranges, ordered as batch size then number of workers,
+// returns an error if no trial succeeds, and does not modify the caller's options.
 //
 // NOTE: Regarding BulkOptions, use NewBulkOptions to create a new instance.
 func (ebi *EBI[T]) HyperparameterOptimization(
@@ -787,11 +940,53 @@ func (ebi *EBI[T]) HyperparameterOptimization(
 	// Parameter range to be optimized.
 	parameterRange []ho.ParameterRange[int],
 ) ([]int, error) {
+	//////
+	// Validation.
+	//////
+
+	if opts == nil {
+		return nil, ErrorCatalog.
+			MustGet(ErrHyperparameterOptimization).
+			NewInvalidError(customerror.WithField("options", "must not be nil"))
+	}
+
+	// The benchmark maps params[0] and params[1] to batch size and worker count,
+	// so any other number of ranges cannot describe a usable trial.
+	if len(parameterRange) != 2 {
+		return nil, ErrorCatalog.
+			MustGet(ErrHyperparameterOptimization).
+			NewInvalidError(customerror.WithField("parameterRanges", len(parameterRange)))
+	}
+
+	for i, parameterRange := range parameterRange {
+		// Non-positive or inverted ranges would make the generated bulk options
+		// invalid or cause ho's inclusive random-range calculation to panic.
+		if parameterRange.Min <= 0 || parameterRange.Min > parameterRange.Max {
+			return nil, ErrorCatalog.
+				MustGet(ErrHyperparameterOptimization).
+				NewInvalidError(
+					customerror.WithField("parameterRange", i),
+					customerror.WithField("min", parameterRange.Min),
+					customerror.WithField("max", parameterRange.Max),
+				)
+		}
+	}
+
+	// Trials need private mutable settings while the caller's reusable options
+	// remain observably unchanged.
+	optsCopy := *opts
+
+	// ho invokes benchmarkFunc sequentially in its sampling and optimization
+	// loops, so these trial results do not require synchronization.
+	successfulTrials := 0
+
+	var lastFailure error
+
 	// Benchmark function that tests different parameter combinations.
 	benchmarkFunc := func(params ...int) error {
 		// Parameters to be optimized.
-		opts.BatchSize = params[0]
-		opts.NumWorkers = NumWorkersManual(params[1])
+		optsCopy.BatchSize = params[0]
+		optsCopy.NumWorkers = NumWorkersManual(params[1])
 
 		// We don't care about metrics, just the error, if any
 		// must be returned so the Gaussian Process can learn
@@ -799,12 +994,14 @@ func (ebi *EBI[T]) HyperparameterOptimization(
 		if err := ebi.BulkCreate(
 			ctx,
 			docs,
-			opts,
+			&optsCopy,
 		); err != nil {
-			return ErrorCatalog.
-				MustGet(ErrHyperparameterOptimization).
-				NewFailedToError(customerror.WithError(err))
+			lastFailure = err
+
+			return err
 		}
+
+		successfulTrials++
 
 		return nil
 	}
@@ -815,6 +1012,26 @@ func (ebi *EBI[T]) HyperparameterOptimization(
 		benchmarkFunc,
 		parameterRange...,
 	)
+
+	// ho converts benchmark errors into timing penalties and returns no error,
+	// so an all-failed run must be surfaced explicitly to the caller.
+	//
+	// lastFailure is nil when ho never ran a trial at all — an optimization
+	// config with no initial samples and no iterations. There is still no
+	// usable result to report, so that case errors too, just without a cause.
+	if successfulTrials == 0 {
+		errorOpts := []customerror.Option{
+			customerror.WithField("successfulTrials", successfulTrials),
+		}
+
+		if lastFailure != nil {
+			errorOpts = append(errorOpts, customerror.WithError(lastFailure))
+		}
+
+		return optimalSize, ErrorCatalog.
+			MustGet(ErrHyperparameterOptimization).
+			NewFailedToError(errorOpts...)
+	}
 
 	return optimalSize, nil
 }

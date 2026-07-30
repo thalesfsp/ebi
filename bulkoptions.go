@@ -77,29 +77,34 @@ func NumWorkersAutoDiscovery[T any](ctx context.Context, ebi *EBI[T]) NumWorkers
 // NOTE: Use NewBulkOptions() to create a new BulkOptions struct!
 type BulkOptions[T any] struct {
 	// These are options that can be used in the hyperparameter tuning.
-	BatchSize  int            `json:"batchSize"`
+	BatchSize  int            `json:"batchSize"  validate:"omitempty,gte=0"`
 	NumWorkers NumWorkersFunc `json:"numWorkers"`
 
 	// Sample doc.
 	SampleDoc json.RawMessage `json:"sampleDoc" validate:"required"`
 
 	// Metrics related.
-	MetricsCheck time.Duration `default:"5s" json:"metricsCheck" validate:"required"`
+	MetricsCheck time.Duration `default:"5s" json:"metricsCheck" validate:"omitempty,gt=0"`
 
-	// MetricsCh receives point-in-time snapshots of the metrics.
+	// MetricsCh receives best-effort point-in-time snapshots of the metrics.
 	//
-	// NOTE: Delivery is best-effort: when the channel is full — or nobody
-	// is reading — snapshots are DROPPED rather than blocking the indexing
-	// workers. Buffer the channel to reduce drops. Do not close it while a
-	// bulk operation may still be running.
+	// NOTE: A full or unread channel DROPS snapshots rather than blocking an
+	// indexing worker. Buffer it generously for steady delivery. Callers must
+	// NEVER close this channel, even after BulkCreate returns: a cancelled run
+	// can leave the underlying bulk indexer's workers briefly alive, and a late
+	// callback sending on a closed channel panics. Stopping reads is safe.
 	MetricsCh chan<- *Metrics
 
 	// Async error handling.
 	//
-	// NOTE: Unlike MetricsCh, error delivery blocks until the reader
-	// receives it (or the operation's context ends) — keep reading until
-	// BulkCreate returns, and do not close the channel while a bulk
-	// operation may still be running.
+	// NOTE: Delivery is best-effort at all times: errors are dropped whenever
+	// the channel cannot accept them immediately. Callers that want every error
+	// must buffer it generously. BulkCreate always returns an error for a failed
+	// operation, so ErrorCh provides detail, not the sole failure signal.
+	// Callers must NEVER close this channel, even after BulkCreate returns: a
+	// cancelled run can leave the underlying bulk indexer's workers briefly
+	// alive, and a late callback sending on a closed channel panics. Stopping
+	// reads is safe.
 	ErrorCh chan<- error
 
 	// Internals related.

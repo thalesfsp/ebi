@@ -103,12 +103,48 @@ func (gm *Metrics) UpdateWritePressure(writePressure float64) {
 	gm.WritePressure = writePressure
 }
 
+// updateComputed publishes every derived value in ONE critical section so a
+// concurrent GetMetrics can never observe a half-updated set (e.g. a new
+// MemoryPressure beside a stale OverallPressure).
+//
+// numDataNodes/ramPerNodeGB are applied only when numDataNodes > 0: a stats
+// response that reports no data nodes must not wipe the last known topology,
+// which BulkCreate relies on to size its worker pool.
+func (gm *Metrics) updateComputed(
+	memoryPressure, writePressure, overallPressure float64,
+	numDataNodes, ramPerNodeGB int,
+) {
+	gm.mu.Lock()
+	defer gm.mu.Unlock()
+
+	gm.MemoryPressure = memoryPressure
+	gm.WritePressure = writePressure
+	gm.OverallPressure = overallPressure
+
+	if numDataNodes > 0 {
+		gm.numDataNodes = numDataNodes
+		gm.ramPerNodeGB = ramPerNodeGB
+	}
+}
+
 // UpdateBytesProcessed updates the number of bytes processed.
 func (gm *Metrics) UpdateBytesProcessed(delta int64) {
 	gm.mu.Lock()
 	defer gm.mu.Unlock()
 
 	gm.BytesProcessed += delta
+}
+
+// AddProcessed records one processed document and the bytes it contributed in a
+// SINGLE critical section. The hot path always updates both together, so taking
+// the mutex twice (IncreaseDocsProcessed + UpdateBytesProcessed) is pure
+// overhead. bytes may be 0 — delete operations carry no body.
+func (gm *Metrics) AddProcessed(bytes int64) {
+	gm.mu.Lock()
+	defer gm.mu.Unlock()
+
+	gm.DocsProcessed++
+	gm.BytesProcessed += bytes
 }
 
 // IncreaseDocsFailed increases the number of documents that failed.
@@ -151,24 +187,23 @@ func (gm *Metrics) UpdateNodeStats(ns *NodesStats) {
 	gm.NodeStats = ns
 }
 
-// updateNodeInfo updates the node topology snapshot. It runs on the metrics
-// goroutine while GetMetrics readers run on other goroutines, so these
-// fields must never be written without the lock.
-func (gm *Metrics) updateNodeInfo(numDataNodes, ramPerNodeGB int) {
-	gm.mu.Lock()
-	defer gm.mu.Unlock()
-
-	gm.numDataNodes = numDataNodes
-	gm.ramPerNodeGB = ramPerNodeGB
-}
-
 // getNodeInfo returns the node topology snapshot (numDataNodes,
-// ramPerNodeGB). Locked counterpart of updateNodeInfo.
+// ramPerNodeGB). Locked counterpart of updateComputed.
 func (gm *Metrics) getNodeInfo() (int, int) {
 	gm.mu.Lock()
 	defer gm.mu.Unlock()
 
 	return gm.numDataNodes, gm.ramPerNodeGB
+}
+
+// getStatus returns the status under lock. The per-document pause check in
+// BulkCreate uses this instead of GetMetrics() so reading one field does not
+// allocate and copy the whole struct.
+func (gm *Metrics) getStatus() Status {
+	gm.mu.Lock()
+	defer gm.mu.Unlock()
+
+	return gm.Status
 }
 
 // GetMetrics returns a copy of the Metrics struct.

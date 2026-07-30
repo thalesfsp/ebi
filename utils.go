@@ -153,7 +153,17 @@ func calculateSystemPressure(
 		// Data nodes and total RAM.
 		//////
 
-		if strings.Contains(strings.Join(node.Roles, ","), "data") {
+		isDataNode := false
+
+		for _, role := range node.Roles {
+			if strings.Contains(role, "data") {
+				isDataNode = true
+
+				break
+			}
+		}
+
+		if isDataNode {
 			dataNodes++
 
 			// RAM is derived from the JVM heap; a node reporting no JVM
@@ -185,20 +195,21 @@ func calculateSystemPressure(
 	// Overall Pressure is the composition of memory (60%) and write (40%).
 	overallPressure = (memoryPressure * 0.6) + (writePressure * 0.4)
 
-	// Update metrics.
-	metrics.UpdateMemoryPressure(memoryPressure)
-
-	metrics.UpdateWritePressure(writePressure)
-
-	metrics.UpdateOverallPressure(overallPressure)
-
 	// Calculate average RAM per node.
-	//
-	// NOTE: Written through the locked setter — this runs on the metrics
-	// goroutine while GetMetrics/getNodeInfo readers run elsewhere.
+	ramPerNodeGB := 0
+
 	if dataNodes > 0 {
-		metrics.updateNodeInfo(int(dataNodes), int(totalRAMGB/dataNodes))
+		ramPerNodeGB = int(totalRAMGB / dataNodes)
 	}
+
+	// Update metrics.
+	metrics.updateComputed(
+		memoryPressure,
+		writePressure,
+		overallPressure,
+		int(dataNodes),
+		ramPerNodeGB,
+	)
 }
 
 // updateIndexMetrics fetches node stats from Elasticsearch and

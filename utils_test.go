@@ -162,46 +162,48 @@ func TestHandleChannel_DoneChCancelsErrorSend(t *testing.T) {
 	}
 }
 
-// TestAsyncErrorSend_DoesNotBlockOnCtxCancel verifies the package-level
-// helper extracted from BulkCreate's asyncErrorHandler: with an unbuffered
-// errorCh and no reader, a cancelled ctx must unblock the send.
-func TestAsyncErrorSend_DoesNotBlockOnCtxCancel(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
+// TestAsyncErrorSend_DoesNotBlockWhenChannelCannotAccept verifies that error
+// delivery is best-effort at all times: a full or unread channel must be
+// dropped immediately rather than blocking the caller.
+func TestAsyncErrorSend_DoesNotBlockWhenChannelCannotAccept(t *testing.T) {
+	tests := map[string]chan error{
+		"full buffered channel": func() chan error {
+			errorCh := make(chan error, 1)
+			errorCh <- errors.New("already full")
 
-	errorCh := make(chan error) // unbuffered, no reader.
+			return errorCh
+		}(),
+		"unbuffered channel without reader": make(chan error),
+	}
 
-	done := make(chan struct{})
+	for name, errorCh := range tests {
+		t.Run(name, func(t *testing.T) {
+			done := make(chan bool, 1)
 
-	go func() {
-		defer close(done)
+			go func() {
+				done <- asyncErrorSend(errorCh, errors.New("forced"))
+			}()
 
-		// With ctx already cancelled this must return false quickly.
-		cancel()
-
-		if asyncErrorSend(ctx, errorCh, errors.New("forced")) {
-			t.Errorf("asyncErrorSend reported delivery when ctx was cancelled")
-		}
-	}()
-
-	select {
-	case <-done:
-		// PASS
-	case <-time.After(1 * time.Second):
-		t.Fatal("asyncErrorSend did not return after ctx cancel with dead reader")
+			select {
+			case delivered := <-done:
+				if delivered {
+					t.Fatal("asyncErrorSend reported delivery when the channel could not accept it")
+				}
+			case <-time.After(500 * time.Millisecond):
+				t.Fatal("asyncErrorSend blocked when the channel could not accept the error")
+			}
+		})
 	}
 }
 
-// TestAsyncErrorSend_DeliversWhenReaderPresent verifies the happy path: a
-// live reader receives the error and the helper reports delivered=true.
-func TestAsyncErrorSend_DeliversWhenReaderPresent(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+// TestAsyncErrorSend_DeliversImmediately verifies the happy path: a buffered
+// channel with room receives the error and the helper reports delivered=true.
+func TestAsyncErrorSend_DeliversImmediately(t *testing.T) {
+	errorCh := make(chan error, 1)
 
-	errorCh := make(chan error, 1) // buffered so the send completes.
-
-	delivered := asyncErrorSend(ctx, errorCh, errors.New("forced"))
+	delivered := asyncErrorSend(errorCh, errors.New("forced"))
 	if !delivered {
-		t.Fatal("asyncErrorSend reported non-delivery with a ready reader")
+		t.Fatal("asyncErrorSend reported non-delivery when the channel had room")
 	}
 
 	select {
@@ -218,15 +220,12 @@ func TestAsyncErrorSend_DeliversWhenReaderPresent(t *testing.T) {
 // `errorCh <- err` on a nil channel blocks forever in Go, so the guard is
 // load-bearing.
 func TestAsyncErrorSend_NoPanicOnNilChannel(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
 	done := make(chan struct{})
 
 	go func() {
 		defer close(done)
 
-		if asyncErrorSend(ctx, nil, errors.New("forced")) {
+		if asyncErrorSend(nil, errors.New("forced")) {
 			t.Errorf("asyncErrorSend reported delivery on nil channel")
 		}
 	}()

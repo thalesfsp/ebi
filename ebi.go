@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/elastic/go-elasticsearch/v8"
@@ -200,9 +202,9 @@ func bestEffortMetricsSend(ch chan<- *Metrics, m *Metrics) {
 	}
 }
 
-// asyncErrorSend sends err to errorCh without blocking if ctx is cancelled
-// or errorCh is nil. Returns true if the error was delivered, false if
-// ctx cancelled first or errorCh was nil.
+// asyncErrorSend sends err to errorCh whenever it is immediately deliverable,
+// otherwise waiting only while ctx remains active. Returns true if the error
+// was delivered, false if cancellation wins or errorCh is nil.
 //
 // This is the deadlock-safe counterpart to a bare `errorCh <- err` send:
 // callers can signal an error asynchronously without risking a hang when
@@ -210,6 +212,16 @@ func bestEffortMetricsSend(ch chan<- *Metrics, m *Metrics) {
 func asyncErrorSend(ctx context.Context, errorCh chan<- error, err error) bool {
 	if errorCh == nil {
 		return false
+	}
+
+	// Fast path: deliver without blocking whenever the channel has room (or a
+	// receiver is already waiting). Doing this before the ctx-guarded send also
+	// makes delivery deterministic once ctx is cancelled — a single select with
+	// both cases ready picks pseudo-randomly and would drop deliverable errors.
+	select {
+	case errorCh <- err:
+		return true
+	default:
 	}
 
 	select {
@@ -396,12 +408,12 @@ func (ebi *EBI[T]) BulkCreate(
 	// Internal helpers.
 	//////
 
-	// metricsCtx is an INTERNAL context that fires Done() exactly when
-	// BulkCreate returns (via the deferred metricsCancel below). This
-	// guarantees the metrics goroutine exits cleanly even when the
-	// caller's `ctx` never fires Done() — for example when the caller
-	// passes context.Background() or a context.WithoutCancel-derived
-	// context (proj-ringboost-vendor cleanupCtx).
+	// metricsCtx is an INTERNAL context that fires Done() when BulkCreate
+	// begins cleanup. This guarantees the metrics goroutine exits cleanly
+	// even when the caller's `ctx` never fires Done() — for example when
+	// the caller passes context.Background() or a
+	// context.WithoutCancel-derived context (proj-ringboost-vendor
+	// cleanupCtx).
 	//
 	// Without this, the goroutine watches only the caller's ctx; once
 	// BulkCreate's deferred ticker.Stop() runs, the goroutine is parked
@@ -416,6 +428,8 @@ func (ebi *EBI[T]) BulkCreate(
 	// TestBulkCreate_NoMetricsGoroutineLeak_AfterReturn.
 	metricsCtx, metricsCancel := context.WithCancel(ctx)
 	defer metricsCancel()
+
+	metricsDone := make(chan struct{})
 
 	// Helper function to send async errors.
 	//
@@ -440,6 +454,14 @@ func (ebi *EBI[T]) BulkCreate(
 		refresh = "true"
 	}
 
+	// esutil invokes OnError concurrently from its worker goroutines and may
+	// invoke it more than once for the same flush failure. Retaining only the
+	// first error preserves the original cause without racing or overwriting it.
+	var (
+		indexerErrorMu sync.Mutex
+		indexerError   error
+	)
+
 	// Configure Bulk Indexer (BI).
 	bi, err := esutil.NewBulkIndexer(esutil.BulkIndexerConfig{
 		Client:        ebi.client,
@@ -451,6 +473,19 @@ func (ebi *EBI[T]) BulkCreate(
 		OnFlushStart:  opts.FlushStartFunc,
 		OnFlushEnd:    opts.FlushEndFunc,
 		OnError: func(_ context.Context, err error) {
+			// Cancellation is already returned through BulkCreate's context
+			// paths, so treating it as an indexer failure would report it twice.
+			if errors.Is(err, context.Canceled) ||
+				errors.Is(err, context.DeadlineExceeded) {
+				return
+			}
+
+			indexerErrorMu.Lock()
+			if indexerError == nil {
+				indexerError = err
+			}
+			indexerErrorMu.Unlock()
+
 			// Update metrics.
 			metrics.IncrementErrorCount()
 
@@ -496,11 +531,11 @@ func (ebi *EBI[T]) BulkCreate(
 	}
 
 	defer func() {
-		// Cancelling the metrics context BEFORE closing is load-bearing
-		// on error paths: Close blocks until the workers flush, and the
-		// worker callbacks' error sends are guarded by metricsCtx — with
-		// it cancelled they can never hang this return.
+		// Close waits for worker callbacks that may be parked on a ctx-guarded
+		// error send, while joining prevents an in-flight metrics tick from
+		// sending after return. Cancelling first releases both kinds of work.
 		metricsCancel()
+		<-metricsDone
 
 		// Best-effort close: the main path already closed and consumed
 		// the error; here an error is already being returned.
@@ -511,13 +546,15 @@ func (ebi *EBI[T]) BulkCreate(
 	// Metrics monitoring goroutine.
 	//////
 
-	// Start metrics monitoring goroutine. It exits via metricsCtx (see
-	// its comment above) when BulkCreate returns.
+	// Start metrics monitoring goroutine. It exits via metricsCtx before
+	// BulkCreate finishes cleanup.
 	metricsTicker := time.NewTicker(opts.MetricsCheck)
 
 	defer metricsTicker.Stop()
 
 	go func() {
+		defer close(metricsDone)
+
 		for {
 			select {
 			case <-metricsCtx.Done():
@@ -584,6 +621,8 @@ func (ebi *EBI[T]) BulkCreate(
 		}
 	}()
 
+	marshalFailedDocs := 0
+
 	// Bulk insertion.
 	//
 	// NOTE: This is a parallel, asynchronous, efficient indexing process.
@@ -638,7 +677,12 @@ func (ebi *EBI[T]) BulkCreate(
 
 		if opErr != nil {
 			// Update metrics.
+			metrics.IncreaseDocsFailed()
 			metrics.IncrementErrorCount()
+
+			// Counted separately: these documents never reach esutil, so its
+			// failed-document stat cannot account for them.
+			marshalFailedDocs++
 
 			// Send this async error to the error channel.
 			asyncErrorHandler(
@@ -759,10 +803,15 @@ func (ebi *EBI[T]) BulkCreate(
 		bestEffortMetricsSend(opts.MetricsCh, metrics)
 	}
 
-	// Flush the remaining buffered documents BEFORE reading the stats:
-	// with the default FlushBytes and a small doc set the ONLY flush
-	// happens inside Close — reading Stats() first would miss every
-	// failure from that final flush and report success.
+	// Close waits for workers whose callbacks may be parked on a ctx-guarded
+	// error send. Cancelling first releases those callbacks, and joining the
+	// metrics goroutine guarantees it cannot send after BulkCreate returns.
+	metricsCancel()
+	<-metricsDone
+
+	// Flush the remaining buffered documents BEFORE reading the stats: with
+	// the default FlushBytes and a small doc set the only flush happens inside
+	// Close, so reading Stats first would miss failures from the final flush.
 	if err := closeBI(); err != nil {
 		return ErrorCatalog.
 			MustGet(ErrFailedToBulkIndexDocuments).
@@ -775,12 +824,61 @@ func (ebi *EBI[T]) BulkCreate(
 	// Final statistics.
 	stats := bi.Stats()
 
-	// Check if any document failed to index.
-	if stats.NumFailed > 0 {
+	indexerErrorMu.Lock()
+	firstIndexerError := indexerError
+	indexerErrorMu.Unlock()
+
+	// Marshal failures never enter esutil, so its failed count cannot account
+	// for them. Reporting both counters together preserves the full batch loss.
+	if stats.NumFailed > 0 || marshalFailedDocs > 0 {
+		errorOpts := make([]customerror.Option, 0, 5)
+
+		if stats.NumFailed > 0 {
+			errorOpts = append(
+				errorOpts,
+				customerror.WithField("failedDocs", stats.NumFailed),
+				customerror.WithTag("bulkCreate"),
+			)
+		}
+
+		if marshalFailedDocs > 0 {
+			errorOpts = append(
+				errorOpts,
+				customerror.WithField("marshalFailedDocs", marshalFailedDocs),
+				customerror.WithTag("json.Marshal"),
+			)
+		}
+
+		if firstIndexerError != nil {
+			errorOpts = append(errorOpts, customerror.WithError(firstIndexerError))
+		}
+
+		return ErrorCatalog.
+			MustGet(ErrFailedToBulkIndexDocuments).
+			NewFailedToError(errorOpts...)
+	}
+
+	// Flush-wide failures such as an undecodable success response never reach
+	// per-item callbacks, so esutil's failed-document count remains zero.
+	if firstIndexerError != nil {
 		return ErrorCatalog.
 			MustGet(ErrFailedToBulkIndexDocuments).
 			NewFailedToError(
-				customerror.WithField("failedDocs", stats.NumFailed),
+				customerror.WithError(firstIndexerError),
+				customerror.WithTag("esutil.NewBulkIndexer.OnError"),
+			)
+	}
+
+	// Every added item must receive exactly one per-item acknowledgement.
+	// A shorter response can otherwise look successful because esutil only
+	// counts the items present in the response body.
+	if stats.NumAdded != stats.NumFlushed+stats.NumFailed {
+		return ErrorCatalog.
+			MustGet(ErrFailedToBulkIndexDocuments).
+			NewFailedToError(
+				customerror.WithField("numAdded", stats.NumAdded),
+				customerror.WithField("numFlushed", stats.NumFlushed),
+				customerror.WithField("numFailed", stats.NumFailed),
 				customerror.WithTag("bulkCreate"),
 			)
 	}

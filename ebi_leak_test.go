@@ -6,6 +6,8 @@ package ebi
 
 import (
 	"context"
+	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"runtime"
@@ -96,7 +98,12 @@ func fakeESServer(t *testing.T) *httptest.Server {
 				"nodes":{}
 			}`))
 		case strings.Contains(path, "_bulk"):
-			_, _ = w.Write([]byte(`{"took":1,"errors":false,"items":[]}`))
+			// Real Elasticsearch answers a bulk request with exactly one item
+			// per action, and esutil counts a document as flushed only when it
+			// sees that item. Echoing an empty array would under-acknowledge
+			// every document, which BulkCreate now (correctly) reports as a
+			// failure — so the fake has to mirror the real cardinality.
+			_, _ = w.Write(bulkSuccessResponse(r.Body))
 		case strings.HasSuffix(path, "/_refresh"):
 			_, _ = w.Write([]byte(`{"_shards":{"total":1,"successful":1,"failed":0}}`))
 		default:
@@ -107,6 +114,49 @@ func fakeESServer(t *testing.T) *httptest.Server {
 	t.Cleanup(srv.Close)
 
 	return srv
+}
+
+// bulkSuccessResponse builds a bulk reply that acknowledges every action in the
+// request body, the way a real cluster does.
+//
+// A bulk body is NDJSON alternating an action line with an optional source line
+// (delete carries none), so the actions are the lines whose single key is one of
+// the bulk operations. esutil matches response items to its in-flight items by
+// position, so the counts must agree or documents look unacknowledged.
+func bulkSuccessResponse(body io.Reader) []byte {
+	raw, _ := io.ReadAll(body)
+
+	items := make([]map[string]any, 0)
+
+	for _, line := range strings.Split(string(raw), "\n") {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+
+		var action map[string]json.RawMessage
+		if json.Unmarshal([]byte(line), &action) != nil {
+			continue
+		}
+
+		for _, op := range []string{Index, Create, Update, Delete} {
+			if _, ok := action[op]; ok {
+				items = append(items, map[string]any{op: map[string]any{
+					"_index":  "test-idx",
+					"status":  200,
+					"result":  "created",
+					"_shards": map[string]any{"total": 1, "successful": 1, "failed": 0},
+				}})
+
+				break
+			}
+		}
+	}
+
+	out, _ := json.Marshal(map[string]any{
+		"took": 1, "errors": false, "items": items,
+	})
+
+	return out
 }
 
 // newTestEBI constructs an EBI[*TestModel] pointed at the fake ES server.

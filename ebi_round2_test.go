@@ -162,6 +162,36 @@ type round2MarshalModel struct {
 	Value float64 `json:"value"`
 }
 
+func TestRound2BulkCreateMarshalFailureWithUnreadErrorChDoesNotDeadlock(t *testing.T) {
+	f := newCaptureES(t, captureESConfig{})
+	e := newRound2TestEBI[*round2MarshalModel](t, f.srv)
+	errorCh := make(chan error)
+
+	opts, err := NewBulkOptions(
+		"round2-marshal-unread-error-channel",
+		json.RawMessage(`{"id":"sample","value":1}`),
+		WithErrorCh[*round2MarshalModel](errorCh),
+	)
+	require.NoError(t, err)
+
+	done := make(chan error, 1)
+
+	go func() {
+		done <- e.BulkCreate(
+			context.Background(),
+			[]*round2MarshalModel{{ID: "bad", Value: math.NaN()}},
+			opts,
+		)
+	}()
+
+	select {
+	case err := <-done:
+		require.Error(t, err)
+	case <-time.After(10 * time.Second):
+		t.Fatal("BulkCreate did not return: marshal-failure error send deadlocked")
+	}
+}
+
 func TestRound2BulkCreateMarshalFailuresAreReported(t *testing.T) {
 	f := newCaptureES(t, captureESConfig{})
 	e := newRound2TestEBI[*round2MarshalModel](t, f.srv)
@@ -268,11 +298,23 @@ func TestRound2BulkCreateFlushLevelFailures(t *testing.T) {
 			t.Fatal("BulkCreate did not return after cancellation")
 		}
 
-		select {
-		case err := <-errorCh:
-			t.Fatalf("cancellation must not be emitted as an indexer error: %v", err)
-		default:
+		settleTimer := time.NewTimer(3 * time.Second)
+		defer settleTimer.Stop()
+
+		var reportedErrors []error
+
+	drain:
+		for {
+			select {
+			case err := <-errorCh:
+				reportedErrors = append(reportedErrors, err)
+			case <-settleTimer.C:
+				break drain
+			}
 		}
+
+		require.Empty(t, reportedErrors,
+			"cancellation must not be emitted as an indexer error")
 	})
 }
 

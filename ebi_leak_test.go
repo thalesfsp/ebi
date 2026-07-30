@@ -119,16 +119,19 @@ func fakeESServer(t *testing.T) *httptest.Server {
 // bulkSuccessResponse builds a bulk reply that acknowledges every action in the
 // request body, the way a real cluster does.
 //
-// A bulk body is NDJSON alternating an action line with an optional source line
-// (delete carries none), so the actions are the lines whose single key is one of
-// the bulk operations. esutil matches response items to its in-flight items by
-// position, so the counts must agree or documents look unacknowledged.
+// A bulk body is NDJSON alternating an action line with a source line, except
+// that delete actions carry no source. esutil matches response items to its
+// in-flight items by position, so the counts must agree exactly.
 func bulkSuccessResponse(body io.Reader) []byte {
 	raw, _ := io.ReadAll(body)
 
 	items := make([]map[string]any, 0)
+	lines := strings.Split(string(raw), "\n")
 
-	for _, line := range strings.Split(string(raw), "\n") {
+	for lineIndex := 0; lineIndex < len(lines); {
+		line := lines[lineIndex]
+		lineIndex++
+
 		if strings.TrimSpace(line) == "" {
 			continue
 		}
@@ -138,17 +141,29 @@ func bulkSuccessResponse(body io.Reader) []byte {
 			continue
 		}
 
+		operation := ""
+
 		for _, op := range []string{Index, Create, Update, Delete} {
 			if _, ok := action[op]; ok {
-				items = append(items, map[string]any{op: map[string]any{
-					"_index":  "test-idx",
-					"status":  200,
-					"result":  "created",
-					"_shards": map[string]any{"total": 1, "successful": 1, "failed": 0},
-				}})
+				operation = op
 
 				break
 			}
+		}
+
+		if operation == "" {
+			continue
+		}
+
+		items = append(items, map[string]any{operation: map[string]any{
+			"_index":  "test-idx",
+			"status":  200,
+			"result":  "created",
+			"_shards": map[string]any{"total": 1, "successful": 1, "failed": 0},
+		}})
+
+		if operation != Delete {
+			lineIndex++
 		}
 	}
 
@@ -157,6 +172,23 @@ func bulkSuccessResponse(body io.Reader) []byte {
 	})
 
 	return out
+}
+
+func TestBulkSuccessResponseHonorsNDJSONActionSourcePairs(t *testing.T) {
+	body := strings.NewReader(
+		"{\"index\":{\"_index\":\"test-idx\",\"_id\":\"1\"}}\n" +
+			"{\"index\":{\"value\":1}}\n" +
+			"{\"delete\":{\"_index\":\"test-idx\",\"_id\":\"2\"}}\n",
+	)
+
+	var response struct {
+		Items []map[string]json.RawMessage `json:"items"`
+	}
+
+	require.NoError(t, json.Unmarshal(bulkSuccessResponse(body), &response))
+	require.Len(t, response.Items, 2)
+	require.Contains(t, response.Items[0], Index)
+	require.Contains(t, response.Items[1], Delete)
 }
 
 // newTestEBI constructs an EBI[*TestModel] pointed at the fake ES server.

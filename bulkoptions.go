@@ -89,17 +89,22 @@ type BulkOptions[T any] struct {
 	// MetricsCh receives best-effort point-in-time snapshots of the metrics.
 	//
 	// NOTE: A full or unread channel DROPS snapshots rather than blocking an
-	// indexing worker. Buffer it generously for steady delivery. Do not close
-	// it while a bulk operation may still be running.
+	// indexing worker. Buffer it generously for steady delivery. Callers must
+	// NEVER close this channel, even after BulkCreate returns: a cancelled run
+	// can leave the underlying bulk indexer's workers briefly alive, and a late
+	// callback sending on a closed channel panics. Stopping reads is safe.
 	MetricsCh chan<- *Metrics
 
 	// Async error handling.
 	//
-	// NOTE: Delivery is best-effort: errors may be dropped when the channel
-	// is full or unread as the operation winds down. Buffer it generously.
-	// BulkCreate always returns an error for a failed operation, so ErrorCh
-	// provides detail, not the sole failure signal. Do not close it while a
-	// bulk operation may still be running.
+	// NOTE: Delivery is best-effort at all times: errors are dropped whenever
+	// the channel cannot accept them immediately. Callers that want every error
+	// must buffer it generously. BulkCreate always returns an error for a failed
+	// operation, so ErrorCh provides detail, not the sole failure signal.
+	// Callers must NEVER close this channel, even after BulkCreate returns: a
+	// cancelled run can leave the underlying bulk indexer's workers briefly
+	// alive, and a late callback sending on a closed channel panics. Stopping
+	// reads is safe.
 	ErrorCh chan<- error
 
 	// Internals related.

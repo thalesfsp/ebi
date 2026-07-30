@@ -213,32 +213,21 @@ func bestEffortMetricsSend(ch chan<- *Metrics, m *Metrics) {
 	}
 }
 
-// asyncErrorSend sends err to errorCh whenever it is immediately deliverable,
-// otherwise waiting only while ctx remains active. Returns true if the error
-// was delivered, false if cancellation wins or errorCh is nil.
+// asyncErrorSend attempts to send err to errorCh without blocking. It returns
+// true when the channel accepts the error immediately and false when the
+// channel is nil, full, or unread.
 //
-// This is the deadlock-safe counterpart to a bare `errorCh <- err` send:
-// callers can signal an error asynchronously without risking a hang when
-// the reader goroutine has already exited (e.g. on context cancellation).
-func asyncErrorSend(ctx context.Context, errorCh chan<- error, err error) bool {
+// Delivery is best-effort at all times: an error that cannot be delivered
+// immediately is dropped.
+func asyncErrorSend(errorCh chan<- error, err error) bool {
 	if errorCh == nil {
 		return false
 	}
 
-	// Fast path: deliver without blocking whenever the channel has room (or a
-	// receiver is already waiting). Doing this before the ctx-guarded send also
-	// makes delivery deterministic once ctx is cancelled — a single select with
-	// both cases ready picks pseudo-randomly and would drop deliverable errors.
 	select {
 	case errorCh <- err:
 		return true
 	default:
-	}
-
-	select {
-	case errorCh <- err:
-		return true
-	case <-ctx.Done():
 		return false
 	}
 }
@@ -450,16 +439,10 @@ func (ebi *EBI[T]) BulkCreate(
 
 	metricsDone := make(chan struct{})
 
-	// Helper function to send async errors.
-	//
-	// Delegates to asyncErrorSend so the error send is ctx-aware — if the
-	// reader goroutine has already exited (e.g. on context cancellation)
-	// we won't deadlock on an unbuffered ErrorCh. Bound to metricsCtx, NOT
-	// the caller's ctx: with a Background-like caller ctx and a dead
-	// ErrorCh reader, a send guarded only by the caller's ctx would park
-	// its goroutine forever even after BulkCreate returned.
+	// Helper function to send async errors without blocking document production
+	// or an esutil worker when ErrorCh is full or unread.
 	asyncErrorHandler := func(err error) {
-		_ = asyncErrorSend(metricsCtx, opts.ErrorCh, err)
+		_ = asyncErrorSend(opts.ErrorCh, err)
 	}
 
 	//////
@@ -493,8 +476,10 @@ func (ebi *EBI[T]) BulkCreate(
 		OnFlushEnd:    opts.FlushEndFunc,
 		OnError: func(_ context.Context, err error) {
 			// Cancellation is already returned through BulkCreate's context
-			// paths, so treating it as an indexer failure would report it twice.
-			if errors.Is(err, context.Canceled) ||
+			// paths, so treating it or a late transport symptom from an
+			// interrupted request as an indexer failure would report it twice.
+			if ctx.Err() != nil ||
+				errors.Is(err, context.Canceled) ||
 				errors.Is(err, context.DeadlineExceeded) {
 				return
 			}
@@ -550,9 +535,8 @@ func (ebi *EBI[T]) BulkCreate(
 	}
 
 	defer func() {
-		// Close waits for worker callbacks that may be parked on a ctx-guarded
-		// error send, while joining prevents an in-flight metrics tick from
-		// sending after return. Cancelling first releases both kinds of work.
+		// Stop and join our metrics goroutine before asking esutil to close.
+		// Error delivery never blocks worker callbacks.
 		metricsCancel()
 		<-metricsDone
 
@@ -654,6 +638,13 @@ func (ebi *EBI[T]) BulkCreate(
 	}
 
 	onFailure := func(_ context.Context, bII esutil.BulkIndexerItem, res esutil.BulkIndexerResponseItem, err error) {
+		// A cancelled Close can leave esutil's worker briefly alive. Ignore its
+		// late per-item transport symptom because BulkCreate already returned
+		// the caller's cancellation.
+		if ctx.Err() != nil {
+			return
+		}
+
 		errorOpts := []customerror.Option{
 			customerror.WithField("res.Error", res.Error),
 			customerror.WithField("bII.DocumentID", bII.DocumentID),
@@ -837,9 +828,9 @@ func (ebi *EBI[T]) BulkCreate(
 		bestEffortMetricsSend(opts.MetricsCh, metrics)
 	}
 
-	// Close waits for workers whose callbacks may be parked on a ctx-guarded
-	// error send. Cancelling first releases those callbacks, and joining the
-	// metrics goroutine guarantees it cannot send after BulkCreate returns.
+	// Stop and join our metrics goroutine before asking esutil to close. When
+	// ctx is cancelled esutil may return from Close without joining its workers,
+	// whose callbacks therefore use only non-blocking channel sends.
 	metricsCancel()
 	<-metricsDone
 
